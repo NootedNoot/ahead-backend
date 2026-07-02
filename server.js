@@ -1,0 +1,67 @@
+const express = require('express');
+const cors = require('cors');
+const app = express();
+
+app.use(cors()); // allows your GitHub Pages dashboard to call this server
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // set this in Railway, never in code
+
+app.get('/', (req, res) => {
+  res.send('Ahead backend is running.');
+});
+
+app.post('/analyze', async (req, res) => {
+  try {
+    const { readings, latest } = req.body;
+
+    if (!readings || !latest) {
+      return res.status(400).json({ error: 'Missing glucose data' });
+    }
+
+    const prompt = `You are Ahead, a proactive CGM (continuous glucose monitor) insight tool for a Type 1 diabetic. You are NOT a doctor and do NOT give dosing advice. You help users understand their glucose trends and give practical next steps.
+
+Here is the user's glucose data from the last few hours (oldest to newest):
+${readings.map(r => `${r.time}: ${r.sgv} mg/dL ${r.direction || ''} (delta: ${r.delta})`).join('\n')}
+
+Current reading: ${latest.sgv} mg/dL, trend: ${latest.direction}, delta: ${latest.delta} mg/dL
+
+Based on this data:
+1. Write 1-2 sentences describing what you see in plain language (no jargon).
+2. Give exactly 3 short, actionable options the user might consider right now. Be specific and practical. Do NOT recommend specific insulin doses. Format them as:
+OPTION 1: [text]
+OPTION 2: [text]
+OPTION 3: [text]
+
+Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
+
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+      }),
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      console.error('Gemini API error:', data.error);
+      return res.status(500).json({ error: data.error.message });
+    }
+
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response received.';
+    res.json({ text });
+
+  } catch (err) {
+    console.error('Server error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Ahead backend listening on port ${PORT}`);
+});
