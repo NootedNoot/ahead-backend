@@ -87,7 +87,7 @@ Always consult with a healthcare provider for medical decisions.
 LICENSE & PATENT
 ====================
 
-Patent Pending - Ahead Technology
+Patent Pending - Ahead T1d Labs
 
 This project and its technology are protected by pending patent applications.
 Unauthorized reproduction, distribution, or commercial use is prohibited.
