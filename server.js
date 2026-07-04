@@ -6,8 +6,9 @@ app.use(cors()); // allows your GitHub Pages dashboard to call this server
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // set this in Railway, never in code
 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // set this in Railway, never in code
+const DRY_RUN = process.env.DRY_RUN === 'true';
 app.get('/', (req, res) => {
   res.send('Ahead backend is running.');
 });
@@ -35,7 +36,13 @@ OPTION 2: [text]
 OPTION 3: [text]
 
 Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
-
+if (DRY_RUN) {
+      console.log('[DRY RUN] Prompt that would have been sent:');
+      console.log(prompt);
+      return res.json({
+        text: "OPTION 1: [DRY RUN] Fake response, no API call made.\nOPTION 2: [DRY RUN] Wiring works if you're seeing this.\nOPTION 3: [DRY RUN] Flip DRY_RUN off in Railway when ready to go live."
+      });
+    }
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`, {
       method: 'POST',
       headers: {
