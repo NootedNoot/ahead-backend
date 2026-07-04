@@ -10,6 +10,10 @@ const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // set this in Railway, never in code
 const isDryRun = process.env.AHEAD_TEST_MODE === 'true' || req.body.dryRun === true;
 const DRY_RUN = process.env.AHEAD_TEST_MODE === 'true';
+app.use((req, res, next) => {
+  req.dryRun = req.body?.dryRun === true || DRY_RUN;
+  next();
+});
 app.get('/', (req, res) => {
   res.send('Ahead backend is running.');
 });
