@@ -24,15 +24,23 @@ const PRIOR_WINDOW_MINUTES = 10;
 const TREND_PHASE_NOISE_FLOOR = 0.3; // mg/dL/min - smaller diffs than this = just noise, not a real phase change
 
 // Sustained out-of-range (flat, not fast-moving, but stuck)
-const OUT_OF_RANGE_LOW = 70;
-const OUT_OF_RANGE_HIGH = 150;
-const CONSECUTIVE_OUT_OF_RANGE_TRIGGER = 1; // ~15 min at 5-min readings
+const OUT_OF_RANGE_LOW = 80;
+const OUT_OF_RANGE_HIGH = 160;
+const CONSECUTIVE_OUT_OF_RANGE_TRIGGER = 2; // ~15 min at 5-min readings
 
 // Projected-value danger zone. If the 15-min projection lands here, that alone
 // can push severity toward red, since "about to be actually dangerous" matters
 // more than what the rate looked like a minute ago.
 const CRITICAL_PROJECTED_LOW = 70;
 const CRITICAL_PROJECTED_HIGH = 250;
+
+// Projected-value warning zone (yellow). A slow drift can project out of range
+// long before the rate trips the yellow rate threshold - without this band a
+// steady -0.8/min glide goes none -> red with no warning tier in between.
+// LOW aligns with OUT_OF_RANGE_LOW so "projected to leave range" and "sitting
+// out of range" agree on where range is. HIGH is a starting guess - tune it.
+const WARNING_PROJECTED_LOW = 80;
+const WARNING_PROJECTED_HIGH = 200;
 
 /**
  * Rate of change (mg/dL/min) using the oldest and newest reading inside a
@@ -111,6 +119,7 @@ function classifySeverity({ recentRate, trendPhase, projected, consecutiveOutOfR
   const isYellowRate =
     recentRate !== null && (recentRate >= YELLOW_RISE_THRESHOLD || recentRate <= YELLOW_FALL_THRESHOLD);
   const projectedCritical = projected <= CRITICAL_PROJECTED_LOW || projected >= CRITICAL_PROJECTED_HIGH;
+  const projectedWarning = projected <= WARNING_PROJECTED_LOW || projected >= WARNING_PROJECTED_HIGH;
   const sustainedOutOfRange = consecutiveOutOfRange >= CONSECUTIVE_OUT_OF_RANGE_TRIGGER;
 
   if (isRedRate || projectedCritical) {
@@ -120,7 +129,7 @@ function classifySeverity({ recentRate, trendPhase, projected, consecutiveOutOfR
     return 'red';
   }
 
-  if (isYellowRate || sustainedOutOfRange) return 'yellow';
+  if (isYellowRate || sustainedOutOfRange || projectedWarning) return 'yellow';
 
   return 'none';
 }
@@ -203,5 +212,7 @@ module.exports = {
   YELLOW_FALL_THRESHOLD,
   RED_RISE_THRESHOLD,
   RED_FALL_THRESHOLD,
-  PROJECTION_MINUTES
+  PROJECTION_MINUTES,
+  WARNING_PROJECTED_LOW,
+  WARNING_PROJECTED_HIGH
 };
