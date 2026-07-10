@@ -7,40 +7,38 @@
 
 // ---- TUNING KNOBS ----
 
-// Rate thresholds (mg/dL/min)
-const YELLOW_RISE_THRESHOLD = 1.5;
-const YELLOW_FALL_THRESHOLD = -1.5;
-const RED_RISE_THRESHOLD = 2.5;
-const RED_FALL_THRESHOLD = -2.5;
-
 // Projection + lookback windows
 const PROJECTION_MINUTES = 15;
 const LOOKBACK_MINUTES = 20; // feeds the overall rate used for the projection
+// Longer horizon used only for the "fast move heading toward danger" yellow
+// nudge: if the current slope extended this far out would reach a red zone, warn
+// now even though the 15-min projection hasn't quite gotten there yet.
+const EXTENDED_PROJECTION_MINUTES = 30;
 
-// Two-window comparison - this is what detects accelerating vs decelerating.
-// "Recent" is compared against the window right before it.
+// Two-window comparison - detects accelerating vs decelerating. Still computed
+// and surfaced to the app for passive display, but it no longer influences
+// severity (a slowing/reversing trend used to downgrade alerts; that rule is
+// gone in favour of pure proximity-to-danger tiering).
 const RECENT_WINDOW_MINUTES = 10;
 const PRIOR_WINDOW_MINUTES = 10;
 const TREND_PHASE_NOISE_FLOOR = 0.3; // mg/dL/min - smaller diffs than this = just noise, not a real phase change
 
-// Sustained out-of-range (flat, not fast-moving, but stuck)
+// Display-only band. countConsecutiveOutOfRange reports how many of the most
+// recent readings sit outside this range, purely as context for the app - this
+// no longer feeds severity (it used to fire yellow on any value above 160,
+// which is what made mildly-high-but-falling readings like 198 or 163 noisy).
 const OUT_OF_RANGE_LOW = 80;
 const OUT_OF_RANGE_HIGH = 160;
-const CONSECUTIVE_OUT_OF_RANGE_TRIGGER = 2; // ~15 min at 5-min readings
 
-// Projected-value danger zone. If the 15-min projection lands here, that alone
-// can push severity toward red, since "about to be actually dangerous" matters
-// more than what the rate looked like a minute ago.
-const CRITICAL_PROJECTED_LOW = 70;
-const CRITICAL_PROJECTED_HIGH = 250;
-
-// Projected-value warning zone (yellow). A slow drift can project out of range
-// long before the rate trips the yellow rate threshold - without this band a
-// steady -0.8/min glide goes none -> red with no warning tier in between.
-// LOW aligns with OUT_OF_RANGE_LOW so "projected to leave range" and "sitting
-// out of range" agree on where range is. HIGH is a starting guess - tune it.
-const WARNING_PROJECTED_LOW = 80;
-const WARNING_PROJECTED_HIGH = 200;
+// Severity is proximity-based: it keys off where glucose is PROJECTED to land,
+// not how fast it's moving. Rate is shown as context but never escalates on its
+// own while the projection stays in a safe range.
+//   Yellow: projection approaching a caution zone.
+//   Red:    projection crossing a real danger threshold.
+const YELLOW_PROJECTED_LOW = 90;
+const YELLOW_PROJECTED_HIGH = 200;
+const RED_PROJECTED_LOW = 70;
+const RED_PROJECTED_HIGH = 250;
 
 /**
  * Rate of change (mg/dL/min) using the oldest and newest reading inside a
@@ -112,24 +110,31 @@ function getTrendPhase(recentRate, priorRate) {
 
 /**
  * The core decision: what severity does this moment deserve.
+ *
+ * Proximity-first: severity is a function of where glucose is PROJECTED to land,
+ * not how fast it's moving. Velocity only escalates through the extended-horizon
+ * nudge below, which is inherently direction-aware (extrapolating the real slope
+ * further out) - so a value that's merely high-but-falling toward safe stays
+ * 'none' instead of firing a pointless warning.
  */
-function classifySeverity({ recentRate, trendPhase, projected, consecutiveOutOfRange }) {
-  const isRedRate =
-    recentRate !== null && (recentRate >= RED_RISE_THRESHOLD || recentRate <= RED_FALL_THRESHOLD);
-  const isYellowRate =
-    recentRate !== null && (recentRate >= YELLOW_RISE_THRESHOLD || recentRate <= YELLOW_FALL_THRESHOLD);
-  const projectedCritical = projected <= CRITICAL_PROJECTED_LOW || projected >= CRITICAL_PROJECTED_HIGH;
-  const projectedWarning = projected <= WARNING_PROJECTED_LOW || projected >= WARNING_PROJECTED_HIGH;
-  const sustainedOutOfRange = consecutiveOutOfRange >= CONSECUTIVE_OUT_OF_RANGE_TRIGGER;
+function classifySeverity({ currentValue, rate, projected, projectedExtended }) {
+  // RED: the 15-min projection crosses a real danger threshold, OR we're already
+  // in a danger zone and still moving deeper into it (direction guard - a value
+  // already past the threshold but heading back toward safe doesn't count).
+  const projectedRed = projected <= RED_PROJECTED_LOW || projected >= RED_PROJECTED_HIGH;
+  const worseningInDanger =
+    (currentValue <= RED_PROJECTED_LOW && rate < 0) ||
+    (currentValue >= RED_PROJECTED_HIGH && rate > 0);
+  if (projectedRed || worseningInDanger) return 'red';
 
-  if (isRedRate || projectedCritical) {
-    // Fast and/or heading somewhere dangerous - BUT if it's actively
-    // correcting itself, don't cry wolf at the max volume.
-    if (trendPhase === 'decelerating') return 'yellow';
-    return 'red';
-  }
-
-  if (isYellowRate || sustainedOutOfRange || projectedWarning) return 'yellow';
+  // YELLOW: the projection is approaching a caution zone, OR the current slope
+  // extended to the longer horizon would reach red territory (early warning on a
+  // genuinely fast move - the extended projection encodes direction, so it can't
+  // fire on drift heading toward safe).
+  const projectedYellow = projected <= YELLOW_PROJECTED_LOW || projected >= YELLOW_PROJECTED_HIGH;
+  const extendedReachesRed =
+    projectedExtended <= RED_PROJECTED_LOW || projectedExtended >= RED_PROJECTED_HIGH;
+  if (projectedYellow || extendedReachesRed) return 'yellow';
 
   return 'none';
 }
@@ -165,10 +170,11 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
   if (overallRate === null) return { severity: 'none', currentValue: current.sgv };
 
   const projected = projectGlucose(current.sgv, overallRate);
-  const severity = classifySeverity({ recentRate, trendPhase, projected, consecutiveOutOfRange });
+  const projectedExtended = projectGlucose(current.sgv, overallRate, EXTENDED_PROJECTION_MINUTES);
+  const severity = classifySeverity({ currentValue: current.sgv, rate: overallRate, projected, projectedExtended });
 
   if (severity === 'none') {
-    return { severity, rate: overallRate, recentRate, trendPhase, currentValue: current.sgv, projected };
+    return { severity, rate: overallRate, recentRate, trendPhase, currentValue: current.sgv, projected, projectedExtended, consecutiveOutOfRange };
   }
 
   const notificationMessage = buildNotificationMessage(severity, current.sgv, overallRate, projected);
@@ -193,6 +199,8 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
     trendPhase,
     currentValue: current.sgv,
     projected,
+    projectedExtended,
+    consecutiveOutOfRange,
     notificationMessage,
     pushResult,
     geminiResult
@@ -208,11 +216,10 @@ module.exports = {
   countConsecutiveOutOfRange,
   buildNotificationMessage,
   processNewReading,
-  YELLOW_RISE_THRESHOLD,
-  YELLOW_FALL_THRESHOLD,
-  RED_RISE_THRESHOLD,
-  RED_FALL_THRESHOLD,
   PROJECTION_MINUTES,
-  WARNING_PROJECTED_LOW,
-  WARNING_PROJECTED_HIGH
+  EXTENDED_PROJECTION_MINUTES,
+  YELLOW_PROJECTED_LOW,
+  YELLOW_PROJECTED_HIGH,
+  RED_PROJECTED_LOW,
+  RED_PROJECTED_HIGH
 };
