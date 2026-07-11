@@ -10,7 +10,38 @@ const assert = require('node:assert/strict');
 const {
   classifySeverity,
   processNewReading,
+  calculateRate,
 } = require('../trend-detector.js');
+
+// ---- calculateRate: reacts to the latest movement, not a stale window ----
+
+function readingsAt(sgvs, now = Date.now()) {
+  return sgvs.map((sgv, i) => ({ sgv, date: now - (sgvs.length - 1 - i) * 5 * 60 * 1000 }));
+}
+
+test('rate reacts to a fresh drop after a rise (regression: reported +0.6 lag)', () => {
+  // Rising, then the newest reading turns down. A windowed slope would still
+  // read positive; the two-point-recent rate must go negative immediately.
+  const rate = calculateRate(readingsAt([210, 215, 220, 227, 220]));
+  assert.ok(rate < 0, `expected negative rate on reversal, got ${rate}`);
+  assert.equal(rate, (220 - 227) / 5); // -1.4, the newest interval alone
+});
+
+test('steady decline: rate is the smoothed two-interval average', () => {
+  // Same direction throughout -> light average of the last two intervals.
+  const rate = calculateRate(readingsAt([105, 101, 97, 93, 89]));
+  assert.equal(rate, -0.8);
+});
+
+test('single reading yields no rate', () => {
+  assert.equal(calculateRate(readingsAt([120])), null);
+});
+
+test('reversal overrides smoothing within one cycle', () => {
+  // Falling, then a sharp rise on the newest reading -> positive, not averaged.
+  const rate = calculateRate(readingsAt([120, 116, 112, 108, 118]));
+  assert.equal(rate, (118 - 108) / 5); // +2.0
+});
 
 // Helper: extended (30-min) projection from a current value + slope, matching
 // projectGlucose(current, rate, 30). Keeps the unit-test inputs honest.
@@ -158,4 +189,14 @@ test('mildly high but falling toward safe does not alert', async () => {
 
   assert.equal(result.severity, 'none');
   assert.equal(pushCalls.length, 0);
+});
+
+test('reported bug: rose to 227 then dropped to 220 -> projection points DOWN, not up', async () => {
+  // Before the rate fix this reported +0.6/min and projected a rise to ~229 off
+  // a value that had just fallen. The projection must now reflect the drop.
+  const { deps } = stubs();
+  const result = await processNewReading(readingsAtFiveMinSpacing([210, 215, 220, 227, 220]), deps);
+
+  assert.ok(result.rate < 0, `expected negative rate, got ${result.rate}`);
+  assert.ok(result.projected < 220, `expected projection below current 220, got ${result.projected}`);
 });

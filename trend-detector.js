@@ -7,9 +7,8 @@
 
 // ---- TUNING KNOBS ----
 
-// Projection + lookback windows
+// Projection windows
 const PROJECTION_MINUTES = 15;
-const LOOKBACK_MINUTES = 20; // feeds the overall rate used for the projection
 // Longer horizon used only for the "fast move heading toward danger" yellow
 // nudge: if the current slope extended this far out would reach a red zone, warn
 // now even though the 15-min projection hasn't quite gotten there yet.
@@ -60,12 +59,53 @@ function rateInWindow(readings, windowEndTime, windowMinutes) {
   return (last.sgv - first.sgv) / minutesElapsed;
 }
 
+/** Slope (mg/dL/min) between two readings, or null if their timestamps collide. */
+function pointToPointRate(from, to) {
+  const minutes = (to.date - from.date) / 60000;
+  if (minutes <= 0) return null;
+  return (to.sgv - from.sgv) / minutes;
+}
+
 /**
- * Original overall-rate calc, kept as-is for the projection math.
+ * The overall rate that drives the projection - deliberately reactive to the
+ * LATEST movement, not a long windowed average.
+ *
+ * Why not a windowed slope: this used to be an oldest-to-newest slope over a
+ * 20-min window, which carries momentum from stale readings. In real testing a
+ * value that had just dropped 227->220 still reported +0.6/min (because the
+ * window's older end was low), so the projection extrapolated a *rise* off a
+ * value that was actively falling. Projection-based severity is only as good as
+ * the rate is in the moment, so we key off the most recent interval instead.
+ *
+ * Smoothing is intentionally light - at most the two most recent intervals
+ * (3 points) are averaged to damp single-reading noise. Crucially, a direction
+ * reversal in the newest interval OVERRIDES that smoothing within one cycle:
+ * the moment the latest reading turns the other way, we trust it alone rather
+ * than let an older upward interval mask a fresh drop (or vice versa).
  */
 function calculateRate(readings) {
-  const now = readings[readings.length - 1].date;
-  return rateInWindow(readings, now, LOOKBACK_MINUTES);
+  if (readings.length < 2) return null;
+
+  const latest = readings[readings.length - 1];
+  const prev = readings[readings.length - 2];
+  const recentRate = pointToPointRate(prev, latest);
+  if (recentRate === null) return null;
+
+  // Not enough history to smooth - the newest interval is all we have.
+  if (readings.length < 3) return recentRate;
+
+  const prev2 = readings[readings.length - 3];
+  const priorRate = pointToPointRate(prev2, prev);
+  if (priorRate === null) return recentRate;
+
+  // Reversal: the latest move flipped direction vs the interval before it.
+  // React immediately - don't average away a fresh turn.
+  const reversed =
+    Math.sign(recentRate) !== Math.sign(priorRate) && recentRate !== 0 && priorRate !== 0;
+  if (reversed) return recentRate;
+
+  // Same direction: light 2-interval average to take the edge off jitter.
+  return (recentRate + priorRate) / 2;
 }
 
 function projectGlucose(currentValue, rate, minutesAhead = PROJECTION_MINUTES) {
@@ -209,6 +249,7 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
 
 module.exports = {
   calculateRate,
+  pointToPointRate,
   rateInWindow,
   getTrendPhase,
   classifySeverity,
