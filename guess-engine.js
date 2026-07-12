@@ -83,8 +83,47 @@ function generateGuesses(context) {
     guesses.push({ label: 'No clear pattern - worth a manual check?', confidence: 'low' });
   }
 
+  // The dashboard initially shows two hypotheses and can expand to a third.
+  // Give an active event three distinct, deliberately low-confidence prompts
+  // rather than leaving the user with a partly empty "possible explanations"
+  // area. These remain questions, not a claim about what caused the glucose.
+  addContextPrompts(guesses, currentValue, rate);
   return rankAndTrim(guesses);
 }
+
+function addContextPrompts(guesses, currentValue, rate) {
+  const prompts = ifHigh(currentValue)
+    ? [
+        'Could a recent meal still be digesting?',
+        'Could a change in routine, stress, or illness be contributing?',
+        'Does this pattern repeat around this time of day?',
+      ]
+    : ifLow(currentValue)
+      ? [
+          'Could recent activity or a routine change be contributing?',
+          'Does this pattern repeat around this time of day?',
+          'Could a recent meal timing change be contributing?',
+        ]
+      : rate < 0
+        ? [
+            'Could recent activity or a routine change be contributing?',
+            'Does this pattern repeat around this time of day?',
+            'Could a recent meal timing change be contributing?',
+          ]
+        : [
+            'Could a recent food, activity, or routine change be contributing?',
+            'Does this pattern repeat around this time of day?',
+            'Is there anything different about today worth noting?',
+          ];
+
+  for (const label of prompts) {
+    if (guesses.length >= 3) break;
+    guesses.push({ label, confidence: 'low' });
+  }
+}
+
+function ifHigh(value) { return value >= 180; }
+function ifLow(value) { return value < 80; }
 
 function isEventful(ctx) {
   return ctx.severity === 'yellow' || ctx.severity === 'red' || sustainedOutOfRange(ctx.readings);

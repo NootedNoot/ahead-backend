@@ -56,8 +56,16 @@ test('returns at most 4 guesses, highest confidence first', () => {
   }
 });
 
-test('eventful with no matching rule falls back to no-clear-pattern', () => {
+test('every active event has at least three question-form hypotheses for the expandable UI', () => {
+  const g = generateGuesses(ctx({ currentValue: 308, rate: -0.4, readings: readings([312, 308]) }));
+  assert.ok(g.length >= 3);
+  assert.ok(g.every(x => x.label.trim().endsWith('?')));
+});
+
+test('eventful with no matching rule starts with no-clear-pattern and supplies the expandable prompts', () => {
   // Out-of-range (sustained) but no directional rule matches.
   const g = generateGuesses(ctx({ currentValue: 170, rate: 0, severity: 'none', readings: readings([170, 170]) }));
-  assert.deepEqual(g, [{ label: 'No clear pattern - worth a manual check?', confidence: 'low' }]);
+  assert.equal(g[0].label, 'No clear pattern - worth a manual check?');
+  assert.equal(g.length, 3);
+  assert.ok(g.every(x => x.confidence === 'low'));
 });
