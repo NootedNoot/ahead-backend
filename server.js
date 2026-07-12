@@ -105,7 +105,7 @@ app.get('/api/latest-trend', (req, res) => {
 
 app.post('/api/check-trend', async (req, res) => {
   try {
-    const { readings } = req.body;
+    const { readings, tuning } = req.body;
 
     if (!Array.isArray(readings) || readings.length < 2) {
       return res.status(400).json({ error: 'Missing or insufficient glucose readings (need at least 2)' });
@@ -152,7 +152,7 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
     const results = [];
     for (const reading of newReadings) {
       const historyUpToHere = sorted.filter(r => r.date <= reading.date);
-      const result = await processNewReading(historyUpToHere, { sendPushNotification, callGeminiForAnalysis });
+      const result = await processNewReading(historyUpToHere, { sendPushNotification, callGeminiForAnalysis, tuning });
       results.push({ date: reading.date, ...result });
     }
 

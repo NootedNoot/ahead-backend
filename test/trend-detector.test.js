@@ -13,6 +13,23 @@ const {
   calculateRate,
 } = require('../trend-detector.js');
 
+test('debug tuning overrides server defaults for one request without mutating defaults', () => {
+  assert.equal(
+    classifySeverity({ currentValue: 120, rate: 0.5, projected: 205, projectedExtended: 210 }),
+    'yellow',
+  );
+  assert.equal(
+    classifySeverity({
+      currentValue: 120,
+      rate: 0.5,
+      projected: 205,
+      projectedExtended: 210,
+      tuning: { yellowProjectedHigh: 220, redProjectedHigh: 260 },
+    }),
+    'none',
+  );
+});
+
 // ---- calculateRate: reacts to the latest movement, not a stale window ----
 
 function readingsAt(sgvs, now = Date.now()) {

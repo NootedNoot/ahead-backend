@@ -39,6 +39,46 @@ const YELLOW_PROJECTED_HIGH = 200;
 const RED_PROJECTED_LOW = 70;
 const RED_PROJECTED_HIGH = 250;
 
+const DEFAULT_TUNING = Object.freeze({
+  yellowProjectedLow: YELLOW_PROJECTED_LOW,
+  yellowProjectedHigh: YELLOW_PROJECTED_HIGH,
+  redProjectedLow: RED_PROJECTED_LOW,
+  redProjectedHigh: RED_PROJECTED_HIGH,
+  extendedProjectionMinutes: EXTENDED_PROJECTION_MINUTES,
+  // 2 intervals means a maximum of 3 readings. Keep the real-time rate
+  // reactive: one interval disables smoothing, two applies the light average.
+  smoothingIntervals: 2,
+});
+
+/**
+ * Debug-only callers may attach tuning to /api/check-trend. Treat every input
+ * as untrusted: invalid or implausible values fall back to shipped defaults,
+ * and ordering is repaired so an accidental field edit cannot invert tiers.
+ */
+function resolveTuning(input) {
+  const numberOr = (value, fallback, min, max) =>
+    Number.isFinite(value) && value >= min && value <= max ? value : fallback;
+
+  const yellowLow = numberOr(input?.yellowProjectedLow, DEFAULT_TUNING.yellowProjectedLow, 40, 180);
+  const yellowHigh = numberOr(input?.yellowProjectedHigh, DEFAULT_TUNING.yellowProjectedHigh, 120, 350);
+  const redLow = numberOr(input?.redProjectedLow, DEFAULT_TUNING.redProjectedLow, 40, 150);
+  const redHigh = numberOr(input?.redProjectedHigh, DEFAULT_TUNING.redProjectedHigh, 150, 400);
+
+  return {
+    yellowProjectedLow: Math.max(yellowLow, redLow),
+    yellowProjectedHigh: Math.min(yellowHigh, redHigh),
+    redProjectedLow: Math.min(redLow, yellowLow),
+    redProjectedHigh: Math.max(redHigh, yellowHigh),
+    extendedProjectionMinutes: numberOr(
+      input?.extendedProjectionMinutes,
+      DEFAULT_TUNING.extendedProjectionMinutes,
+      PROJECTION_MINUTES,
+      60,
+    ),
+    smoothingIntervals: Math.round(numberOr(input?.smoothingIntervals, DEFAULT_TUNING.smoothingIntervals, 1, 2)),
+  };
+}
+
 /**
  * Rate of change (mg/dL/min) using the oldest and newest reading inside a
  * window ending at windowEndTime, going back windowMinutes.
@@ -83,7 +123,7 @@ function pointToPointRate(from, to) {
  * the moment the latest reading turns the other way, we trust it alone rather
  * than let an older upward interval mask a fresh drop (or vice versa).
  */
-function calculateRate(readings) {
+function calculateRate(readings, smoothingIntervals = DEFAULT_TUNING.smoothingIntervals) {
   if (readings.length < 2) return null;
 
   const latest = readings[readings.length - 1];
@@ -91,8 +131,9 @@ function calculateRate(readings) {
   const recentRate = pointToPointRate(prev, latest);
   if (recentRate === null) return null;
 
-  // Not enough history to smooth - the newest interval is all we have.
-  if (readings.length < 3) return recentRate;
+  // A one-interval tuning explicitly opts out of smoothing. Otherwise, not
+  // enough history to smooth means the newest interval is all we have.
+  if (smoothingIntervals < 2 || readings.length < 3) return recentRate;
 
   const prev2 = readings[readings.length - 3];
   const priorRate = pointToPointRate(prev2, prev);
@@ -157,23 +198,24 @@ function getTrendPhase(recentRate, priorRate) {
  * further out) - so a value that's merely high-but-falling toward safe stays
  * 'none' instead of firing a pointless warning.
  */
-function classifySeverity({ currentValue, rate, projected, projectedExtended }) {
+function classifySeverity({ currentValue, rate, projected, projectedExtended, tuning }) {
+  const params = resolveTuning(tuning);
   // RED: the 15-min projection crosses a real danger threshold, OR we're already
   // in a danger zone and still moving deeper into it (direction guard - a value
   // already past the threshold but heading back toward safe doesn't count).
-  const projectedRed = projected <= RED_PROJECTED_LOW || projected >= RED_PROJECTED_HIGH;
+  const projectedRed = projected <= params.redProjectedLow || projected >= params.redProjectedHigh;
   const worseningInDanger =
-    (currentValue <= RED_PROJECTED_LOW && rate < 0) ||
-    (currentValue >= RED_PROJECTED_HIGH && rate > 0);
+    (currentValue <= params.redProjectedLow && rate < 0) ||
+    (currentValue >= params.redProjectedHigh && rate > 0);
   if (projectedRed || worseningInDanger) return 'red';
 
   // YELLOW: the projection is approaching a caution zone, OR the current slope
   // extended to the longer horizon would reach red territory (early warning on a
   // genuinely fast move - the extended projection encodes direction, so it can't
   // fire on drift heading toward safe).
-  const projectedYellow = projected <= YELLOW_PROJECTED_LOW || projected >= YELLOW_PROJECTED_HIGH;
+  const projectedYellow = projected <= params.yellowProjectedLow || projected >= params.yellowProjectedHigh;
   const extendedReachesRed =
-    projectedExtended <= RED_PROJECTED_LOW || projectedExtended >= RED_PROJECTED_HIGH;
+    projectedExtended <= params.redProjectedLow || projectedExtended >= params.redProjectedHigh;
   if (projectedYellow || extendedReachesRed) return 'yellow';
 
   return 'none';
@@ -195,13 +237,14 @@ function buildNotificationMessage(severity, currentValue, rate, projected) {
  * Main entry point. Call this after every new reading is stored.
  * readings: full array, sorted oldest -> newest, each { sgv, date }
  */
-async function processNewReading(readings, { sendPushNotification, callGeminiForAnalysis }) {
+async function processNewReading(readings, { sendPushNotification, callGeminiForAnalysis, tuning }) {
   if (!readings || readings.length < 2) return { severity: 'none' };
 
   const current = readings[readings.length - 1];
   const now = current.date;
 
-  const overallRate = calculateRate(readings);
+  const params = resolveTuning(tuning);
+  const overallRate = calculateRate(readings, params.smoothingIntervals);
   const recentRate = rateInWindow(readings, now, RECENT_WINDOW_MINUTES);
   const priorRate = rateInWindow(readings, now - RECENT_WINDOW_MINUTES * 60 * 1000, PRIOR_WINDOW_MINUTES);
   const trendPhase = getTrendPhase(recentRate, priorRate);
@@ -210,11 +253,11 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
   if (overallRate === null) return { severity: 'none', currentValue: current.sgv };
 
   const projected = projectGlucose(current.sgv, overallRate);
-  const projectedExtended = projectGlucose(current.sgv, overallRate, EXTENDED_PROJECTION_MINUTES);
-  const severity = classifySeverity({ currentValue: current.sgv, rate: overallRate, projected, projectedExtended });
+  const projectedExtended = projectGlucose(current.sgv, overallRate, params.extendedProjectionMinutes);
+  const severity = classifySeverity({ currentValue: current.sgv, rate: overallRate, projected, projectedExtended, tuning: params });
 
   if (severity === 'none') {
-    return { severity, rate: overallRate, recentRate, trendPhase, currentValue: current.sgv, projected, projectedExtended, consecutiveOutOfRange };
+    return { severity, rate: overallRate, recentRate, trendPhase, currentValue: current.sgv, projected, projectedExtended, consecutiveOutOfRange, tuning: params };
   }
 
   const notificationMessage = buildNotificationMessage(severity, current.sgv, overallRate, projected);
@@ -241,6 +284,7 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
     projected,
     projectedExtended,
     consecutiveOutOfRange,
+    tuning: params,
     notificationMessage,
     pushResult,
     geminiResult
@@ -263,4 +307,6 @@ module.exports = {
   YELLOW_PROJECTED_HIGH,
   RED_PROJECTED_LOW,
   RED_PROJECTED_HIGH
+  ,DEFAULT_TUNING
+  ,resolveTuning
 };
