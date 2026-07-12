@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { processNewReading } = require('./trend-detector');
+const { generateGuesses } = require('./guess-engine');
 const app = express();
 
 app.use(cors());
@@ -153,7 +154,18 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
     for (const reading of newReadings) {
       const historyUpToHere = sorted.filter(r => r.date <= reading.date);
       const result = await processNewReading(historyUpToHere, { sendPushNotification, callGeminiForAnalysis, tuning });
-      results.push({ date: reading.date, ...result });
+      // Contextual guesses ride along only for actual events (the engine
+      // returns [] otherwise). Bolus history isn't wired yet, so pass null -
+      // the bolus-dependent rules are disabled until that lands.
+      const guesses = generateGuesses({
+        currentValue: result.currentValue,
+        rate: result.rate,
+        severity: result.severity,
+        readings: historyUpToHere,
+        timeOfDayHour: new Date(reading.date).getHours(),
+        minutesSinceLastBolus: null,
+      });
+      results.push({ date: reading.date, ...result, guesses });
     }
 
     lastProcessedDate = newReadings[newReadings.length - 1].date;
