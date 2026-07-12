@@ -153,6 +153,82 @@ function projectGlucose(currentValue, rate, minutesAhead = PROJECTION_MINUTES) {
   return Math.round(currentValue + rate * minutesAhead);
 }
 
+// ---- RED-projection confirmation ----
+// One noisy rate calc (a CGM compression spike, a lone outlier) shouldn't be
+// enough to fire a full RED takeover off a projection that assumes it holds
+// flat. These three helpers let the RED decision consult the last few rate
+// calcs first. YELLOW logic is untouched - this only gates RED.
+
+/** The rate as it would have been calculated at each of the last [count]
+ *  readings, oldest -> newest. Recomputes calculateRate on progressively
+ *  shorter slices so each entry reflects what we'd have reported at that point. */
+function recentRates(readings, count, smoothingIntervals) {
+  const rates = [];
+  for (let k = 0; k < count; k++) {
+    const end = readings.length - k;
+    if (end < 2) break;
+    const r = calculateRate(readings.slice(0, end), smoothingIntervals);
+    if (r === null) break;
+    rates.unshift(r);
+  }
+  return rates;
+}
+
+/**
+ * Classifies the recent rate trajectory:
+ *  - 'consistent'   : same direction, no wild magnitude swings -> trust the flat
+ *                     projection and let RED fire as normal.
+ *  - 'decelerating' : same direction but each rate is gently easing off -> decay
+ *                     the projection instead of holding the rate flat.
+ *  - 'noisy'        : a sign flip or a >50% jump between consecutive rates -> a
+ *                     single reading shouldn't decide RED; wait for confirmation.
+ * With fewer than 3 rates we can't confirm, so we default to 'consistent' - RED
+ * suppression must never make us MISS a genuine fast climb on thin history.
+ */
+function assessRateTrajectory(rates) {
+  if (rates.length < 3) return { kind: 'consistent', avgDeltaPerStep: 0 };
+
+  let signChange = false;
+  let bigSwing = false;
+  for (let i = 1; i < rates.length; i++) {
+    const prev = rates[i - 1];
+    const cur = rates[i];
+    if (Math.sign(prev) !== 0 && Math.sign(cur) !== 0 && Math.sign(prev) !== Math.sign(cur)) signChange = true;
+    const base = Math.abs(prev);
+    if (base === 0 ? cur !== 0 : Math.abs(cur - prev) / base > 0.5) bigSwing = true;
+  }
+  if (signChange || bigSwing) return { kind: 'noisy', avgDeltaPerStep: 0 };
+
+  const decreasing = rates.every((r, i) => i === 0 || Math.abs(r) < Math.abs(rates[i - 1]));
+  if (decreasing) {
+    let sum = 0;
+    for (let i = 1; i < rates.length; i++) sum += rates[i] - rates[i - 1];
+    return { kind: 'decelerating', avgDeltaPerStep: sum / (rates.length - 1) };
+  }
+  return { kind: 'consistent', avgDeltaPerStep: 0 };
+}
+
+/**
+ * Projection that decays the rate toward zero by [avgDeltaPerStep] each step,
+ * instead of holding it flat. Used when the recent trajectory is decelerating:
+ * a climb that's easing off shouldn't project as if the current peak rate holds
+ * for the whole window. The rate is clamped at zero (it levels off, never
+ * reverses) so the decay can only cool the projection, never invert it.
+ */
+function projectWithDecay(currentValue, currentRate, avgDeltaPerStep, minutes, stepMinutes = 5) {
+  let value = currentValue;
+  let r = currentRate;
+  let remaining = minutes;
+  while (remaining > 0) {
+    const step = Math.min(stepMinutes, remaining);
+    value += r * step;
+    if (r > 0) r = Math.max(0, r + avgDeltaPerStep);
+    else if (r < 0) r = Math.min(0, r + avgDeltaPerStep);
+    remaining -= step;
+  }
+  return Math.round(value);
+}
+
 function countConsecutiveOutOfRange(readings) {
   let count = 0;
   for (let i = readings.length - 1; i >= 0; i--) {
@@ -198,16 +274,23 @@ function getTrendPhase(recentRate, priorRate) {
  * further out) - so a value that's merely high-but-falling toward safe stays
  * 'none' instead of firing a pointless warning.
  */
-function classifySeverity({ currentValue, rate, projected, projectedExtended, tuning }) {
+function classifySeverity({ currentValue, rate, projected, projectedExtended, redProjected, allowRed = true, tuning }) {
   const params = resolveTuning(tuning);
-  // RED: the 15-min projection crosses a real danger threshold, OR we're already
-  // in a danger zone and still moving deeper into it (direction guard - a value
+  // The RED decision uses [redProjected] when supplied (a decay-dampened
+  // projection from the trajectory check) and falls back to the flat 15-min
+  // projection otherwise. [allowRed] is false when the recent rate trajectory
+  // is too noisy to trust a single reading with a RED escalation.
+  const redProj = typeof redProjected === 'number' ? redProjected : projected;
+  // RED: the projection crosses a real danger threshold, OR we're already in a
+  // danger zone and still moving deeper into it (direction guard - a value
   // already past the threshold but heading back toward safe doesn't count).
-  const projectedRed = projected <= params.redProjectedLow || projected >= params.redProjectedHigh;
-  const worseningInDanger =
-    (currentValue <= params.redProjectedLow && rate < 0) ||
-    (currentValue >= params.redProjectedHigh && rate > 0);
-  if (projectedRed || worseningInDanger) return 'red';
+  if (allowRed) {
+    const projectedRed = redProj <= params.redProjectedLow || redProj >= params.redProjectedHigh;
+    const worseningInDanger =
+      (currentValue <= params.redProjectedLow && rate < 0) ||
+      (currentValue >= params.redProjectedHigh && rate > 0);
+    if (projectedRed || worseningInDanger) return 'red';
+  }
 
   // YELLOW: the projection is approaching a caution zone, OR the current slope
   // extended to the longer horizon would reach red territory (early warning on a
@@ -221,11 +304,14 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, tu
   return 'none';
 }
 
-function buildNotificationMessage(severity, currentValue, rate, projected) {
+function buildNotificationMessage(severity, currentValue, rate, projected, projectedExtended, extendedMinutes = EXTENDED_PROJECTION_MINUTES) {
   const direction = rate > 0 ? 'rising' : 'falling';
   const sign = rate > 0 ? '+' : '';
   const rateStr = `${sign}${rate.toFixed(1)}`;
-  const base = `${currentValue} ${direction} ${rateStr}mg/dL a min. Expected glucose in ${PROJECTION_MINUTES} mins is ${projected}.`;
+  // Show BOTH projection windows explicitly - the tier can be decided off the
+  // 15-min or the extended window, so the alert text must never imply only one.
+  const base = `${currentValue} ${direction} ${rateStr}mg/dL a min. ` +
+    `Expected ${projected} in ${PROJECTION_MINUTES} min · ${projectedExtended} in ${extendedMinutes} min.`;
 
   if (severity === 'red') {
     return `🔴 URGENT: ${base} Check now.`;
@@ -254,13 +340,26 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
 
   const projected = projectGlucose(current.sgv, overallRate);
   const projectedExtended = projectGlucose(current.sgv, overallRate, params.extendedProjectionMinutes);
-  const severity = classifySeverity({ currentValue: current.sgv, rate: overallRate, projected, projectedExtended, tuning: params });
+
+  // Confirm the RED escalation against the last few rate calcs before trusting
+  // the flat projection (see the RED-projection confirmation helpers above).
+  const rateHistory = recentRates(readings, 3, params.smoothingIntervals);
+  const trajectory = assessRateTrajectory(rateHistory);
+  const redProjected = trajectory.kind === 'decelerating'
+    ? projectWithDecay(current.sgv, overallRate, trajectory.avgDeltaPerStep, PROJECTION_MINUTES)
+    : projected;
+  const allowRed = trajectory.kind !== 'noisy';
+
+  const severity = classifySeverity({
+    currentValue: current.sgv, rate: overallRate, projected, projectedExtended,
+    redProjected, allowRed, tuning: params,
+  });
 
   if (severity === 'none') {
-    return { severity, rate: overallRate, recentRate, trendPhase, currentValue: current.sgv, projected, projectedExtended, consecutiveOutOfRange, tuning: params };
+    return { severity, rate: overallRate, recentRate, trendPhase, currentValue: current.sgv, projected, projectedExtended, redProjected, rateTrajectory: trajectory.kind, consecutiveOutOfRange, tuning: params };
   }
 
-  const notificationMessage = buildNotificationMessage(severity, current.sgv, overallRate, projected);
+  const notificationMessage = buildNotificationMessage(severity, current.sgv, overallRate, projected, projectedExtended, params.extendedProjectionMinutes);
 
   const [pushResult, geminiResult] = await Promise.allSettled([
     sendPushNotification(notificationMessage),
@@ -283,6 +382,8 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
     currentValue: current.sgv,
     projected,
     projectedExtended,
+    redProjected,
+    rateTrajectory: trajectory.kind,
     consecutiveOutOfRange,
     tuning: params,
     notificationMessage,
@@ -294,6 +395,9 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
 module.exports = {
   calculateRate,
   pointToPointRate,
+  recentRates,
+  assessRateTrajectory,
+  projectWithDecay,
   rateInWindow,
   getTrendPhase,
   classifySeverity,

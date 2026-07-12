@@ -11,7 +11,86 @@ const {
   classifySeverity,
   processNewReading,
   calculateRate,
+  assessRateTrajectory,
+  projectWithDecay,
+  buildNotificationMessage,
 } = require('../trend-detector.js');
+
+// ---- RED-projection confirmation (trajectory of the last 3 rate calcs) ----
+
+test('trajectory: steady same-direction climb is consistent', () => {
+  assert.equal(assessRateTrajectory([2.2, 2.5, 2.8]).kind, 'consistent');
+});
+
+test('trajectory: gently easing climb is decelerating with a negative delta', () => {
+  const t = assessRateTrajectory([2.8, 2.5, 2.2]);
+  assert.equal(t.kind, 'decelerating');
+  assert.ok(t.avgDeltaPerStep < 0);
+});
+
+test('trajectory: a sign flip is noisy', () => {
+  assert.equal(assessRateTrajectory([2.0, -1.0, 1.5]).kind, 'noisy');
+});
+
+test('trajectory: a >50% magnitude swing is noisy even if monotonic', () => {
+  assert.equal(assessRateTrajectory([3.0, 1.0, 0.8]).kind, 'noisy');
+});
+
+test('trajectory: fewer than 3 rates defaults to consistent (never suppress RED on thin history)', () => {
+  assert.equal(assessRateTrajectory([2.5, 2.8]).kind, 'consistent');
+});
+
+test('projectWithDecay lands below the flat projection and never reverses', () => {
+  const flat = 300 + 2.8 * 15;                         // 342
+  const decayed = projectWithDecay(300, 2.8, -0.3, 15); // rate eases toward 0
+  assert.ok(decayed < flat, `decayed ${decayed} should be < flat ${flat}`);
+  assert.ok(decayed > 300, 'a positive (if easing) rate still rises overall');
+});
+
+test('classifySeverity: noisy trajectory (allowRed=false) downgrades a would-be RED to YELLOW', () => {
+  const base = { currentValue: 260, rate: 2.8, projected: 302, projectedExtended: 340 };
+  assert.equal(classifySeverity({ ...base, allowRed: true }), 'red');
+  assert.equal(classifySeverity({ ...base, allowRed: false }), 'yellow');
+});
+
+test('classifySeverity: a decayed redProjected under the red band yields YELLOW not RED', () => {
+  // Flat 15-min projection would be red (255), but the decay-dampened one (240)
+  // stays under redHigh -> only the yellow tier (off the flat projection) fires.
+  const severity = classifySeverity({
+    currentValue: 240, rate: 1.0, projected: 255, projectedExtended: 260, redProjected: 240,
+  });
+  assert.equal(severity, 'yellow');
+});
+
+test('buildNotificationMessage shows both projection windows', () => {
+  const msg = buildNotificationMessage('red', 234, 2.8, 262, 295, 30);
+  assert.match(msg, /262 in 15 min/);
+  assert.match(msg, /295 in 30 min/);
+});
+
+// ---- integration: don't weaken a genuine climb, do suppress a noisy spike ----
+
+function stubDeps() {
+  return { deps: { sendPushNotification: async () => {}, callGeminiForAnalysis: async () => ({}) } };
+}
+
+test("real sustained climb (tonight's case) still fires RED", async () => {
+  const { deps } = stubDeps();
+  const now = Date.now();
+  const readings = [180, 195, 210, 225, 240].map((sgv, i) => ({ sgv, date: now - (4 - i) * 5 * 60 * 1000 }));
+  const result = await processNewReading(readings, deps);
+  assert.equal(result.severity, 'red');
+  assert.equal(result.rateTrajectory, 'consistent');
+});
+
+test('a noisy bouncing spike does not fire RED - waits as YELLOW', async () => {
+  const { deps } = stubDeps();
+  const now = Date.now();
+  const readings = [230, 200, 235, 205, 255].map((sgv, i) => ({ sgv, date: now - (4 - i) * 5 * 60 * 1000 }));
+  const result = await processNewReading(readings, deps);
+  assert.equal(result.rateTrajectory, 'noisy');
+  assert.equal(result.severity, 'yellow');
+});
 
 test('debug tuning overrides server defaults for one request without mutating defaults', () => {
   assert.equal(
