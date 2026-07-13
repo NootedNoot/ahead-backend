@@ -79,6 +79,14 @@ function generateGuesses(context) {
     ==================================================================== */
   }
 
+  // Rebound from a treated low: a genuine dip in the recent ~40 min followed by
+  // a climb back out of it. Checked regardless of the current band so it's
+  // caught mid-rebound (e.g. 46 -> 69 rising) instead of falling to "no clear
+  // pattern" - which is exactly what live testing hit.
+  if (reboundingFromLow(readings, rate)) {
+    guesses.push({ label: 'Possible rebound from a recent low?', confidence: 'medium' });
+  }
+
   if (guesses.length === 0) {
     guesses.push({ label: 'No clear pattern - worth a manual check?', confidence: 'low' });
   }
@@ -139,6 +147,16 @@ function sustainedHigh(readings) {
 function recentLow(readings) {
   if (!readings) return false;
   return readings.slice(-6).some(r => r.sgv < 70);
+}
+
+/** True when the recent ~40 min contains a genuine low and glucose is now
+ *  climbing clearly back out of it - a rebound in progress. */
+function reboundingFromLow(readings, rate) {
+  if (rate <= 0 || !readings || readings.length < 2) return false;
+  const recent = readings.slice(-9); // ~40 min at 5-min cadence
+  const min = Math.min(...recent.map(r => r.sgv));
+  const current = recent[recent.length - 1].sgv;
+  return min < 70 && current > min + 5;
 }
 
 /** Two or more consecutive most-recent readings outside 80-160. */

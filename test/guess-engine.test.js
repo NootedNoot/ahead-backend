@@ -29,6 +29,15 @@ test('early-morning rise suggests dawn phenomenon', () => {
   assert.ok(g.some(x => x.label === 'Dawn phenomenon?'));
 });
 
+test('rebounding from a treated low (46 -> 69 rising) is recognized, not "no clear pattern"', () => {
+  const g = generateGuesses(ctx({
+    currentValue: 69, rate: 1.2, severity: 'yellow',
+    readings: readings([46, 52, 58, 63, 69]),
+  }));
+  assert.ok(g.some(x => x.label === 'Possible rebound from a recent low?'), 'rebound guess present');
+  assert.ok(!g.some(x => x.label === 'No clear pattern - worth a manual check?'), 'no fallback');
+});
+
 test('dropping low suggests exercise', () => {
   const g = generateGuesses(ctx({ currentValue: 68, rate: -1.5, severity: 'red', readings: readings([90, 68]) }));
   assert.ok(g.some(x => x.label === 'Recent exercise pulling you down?'));
