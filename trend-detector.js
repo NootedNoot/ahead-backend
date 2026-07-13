@@ -41,7 +41,7 @@ const RED_PROJECTED_HIGH = 250;
 
 // Hard actual-value floor: at or below this, severity is RED no matter what the
 // projection says (see classifySeverity). 54 = the clinical level-2 hypo cutoff.
-const SEVERE_LOW_RED_FLOOR = 54;
+const SEVERE_LOW_RED_FLOOR = 60;
 
 const DEFAULT_TUNING = Object.freeze({
   yellowProjectedLow: YELLOW_PROJECTED_LOW,

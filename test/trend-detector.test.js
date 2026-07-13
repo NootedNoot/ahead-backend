@@ -35,14 +35,12 @@ test('the floor overrides even a noisy-trajectory RED suppression', () => {
   );
 });
 
-test('54 (the floor boundary) is RED; above the floor, projection decides', () => {
-  assert.equal(SEVERE_LOW_RED_FLOOR, 54);
-  // 54: floored to RED even with a benign in-range projection.
-  assert.equal(classifySeverity({ currentValue: 54, rate: 0.5, projected: 88, projectedExtended: 92 }), 'red');
-  // 55: above the floor, so the projection decides. 88 is yellow-band, not red.
-  assert.equal(classifySeverity({ currentValue: 55, rate: 0.5, projected: 88, projectedExtended: 92 }), 'yellow');
-  // NOTE: 57 (from tonight's report) is ABOVE the 54 floor, so it is NOT forced
-  // RED by this rule - it's decided by its projection. Flagged for the user.
+test('60 (the floor boundary) is RED; above the floor, projection decides', () => {
+  assert.equal(SEVERE_LOW_RED_FLOOR, 60);
+  // 60: floored to RED even with a benign in-range projection.
+  assert.equal(classifySeverity({ currentValue: 60, rate: 0.5, projected: 88, projectedExtended: 92 }), 'red');
+  // 61: above the floor, so the projection decides. 88 is yellow-band, not red.
+  assert.equal(classifySeverity({ currentValue: 61, rate: 0.5, projected: 88, projectedExtended: 92 }), 'yellow');
 });
 
 // ---- RED-projection confirmation (trajectory of the last 3 rate calcs) ----
