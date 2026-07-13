@@ -14,7 +14,36 @@ const {
   assessRateTrajectory,
   projectWithDecay,
   buildNotificationMessage,
+  SEVERE_LOW_RED_FLOOR,
 } = require('../trend-detector.js');
+
+// ---- severe-low hard floor (actual value, not projection) ----
+
+test('46 rebounding upward is still RED (actual-value floor beats projection)', () => {
+  // Tonight's real case: 46 climbing after treatment. Projection is in-range and
+  // rising, which pre-floor scored YELLOW - but 46 right now is urgent.
+  assert.equal(
+    classifySeverity({ currentValue: 46, rate: 2.0, projected: 76, projectedExtended: 90 }),
+    'red',
+  );
+});
+
+test('the floor overrides even a noisy-trajectory RED suppression', () => {
+  assert.equal(
+    classifySeverity({ currentValue: 50, rate: 0, projected: 60, projectedExtended: 65, allowRed: false }),
+    'red',
+  );
+});
+
+test('54 (the floor boundary) is RED; above the floor, projection decides', () => {
+  assert.equal(SEVERE_LOW_RED_FLOOR, 54);
+  // 54: floored to RED even with a benign in-range projection.
+  assert.equal(classifySeverity({ currentValue: 54, rate: 0.5, projected: 88, projectedExtended: 92 }), 'red');
+  // 55: above the floor, so the projection decides. 88 is yellow-band, not red.
+  assert.equal(classifySeverity({ currentValue: 55, rate: 0.5, projected: 88, projectedExtended: 92 }), 'yellow');
+  // NOTE: 57 (from tonight's report) is ABOVE the 54 floor, so it is NOT forced
+  // RED by this rule - it's decided by its projection. Flagged for the user.
+});
 
 // ---- RED-projection confirmation (trajectory of the last 3 rate calcs) ----
 

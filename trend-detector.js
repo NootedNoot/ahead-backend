@@ -39,6 +39,10 @@ const YELLOW_PROJECTED_HIGH = 200;
 const RED_PROJECTED_LOW = 70;
 const RED_PROJECTED_HIGH = 250;
 
+// Hard actual-value floor: at or below this, severity is RED no matter what the
+// projection says (see classifySeverity). 54 = the clinical level-2 hypo cutoff.
+const SEVERE_LOW_RED_FLOOR = 54;
+
 const DEFAULT_TUNING = Object.freeze({
   yellowProjectedLow: YELLOW_PROJECTED_LOW,
   yellowProjectedHigh: YELLOW_PROJECTED_HIGH,
@@ -276,6 +280,15 @@ function getTrendPhase(recentRate, priorRate) {
  */
 function classifySeverity({ currentValue, rate, projected, projectedExtended, redProjected, allowRed = true, tuning }) {
   const params = resolveTuning(tuning);
+
+  // HARD FLOOR - actual value, not projection. A genuinely low reading is RED
+  // right now regardless of where the trend/projection thinks it's heading: a
+  // rebound in progress (e.g. 46 climbing after treatment) is still 46 in the
+  // moment, and 46/50/54 are clinically urgent. This is deliberately BEFORE the
+  // allowRed gate, so trajectory dampening can never soften an actual severe low.
+  // 54 mg/dL is the standard clinical "clinically significant hypoglycemia" cutoff.
+  if (currentValue <= SEVERE_LOW_RED_FLOOR) return 'red';
+
   // The RED decision uses [redProjected] when supplied (a decay-dampened
   // projection from the trajectory check) and falls back to the flat 15-min
   // projection otherwise. [allowRed] is false when the recent rate trajectory
@@ -410,7 +423,8 @@ module.exports = {
   YELLOW_PROJECTED_LOW,
   YELLOW_PROJECTED_HIGH,
   RED_PROJECTED_LOW,
-  RED_PROJECTED_HIGH
+  RED_PROJECTED_HIGH,
+  SEVERE_LOW_RED_FLOOR
   ,DEFAULT_TUNING
   ,resolveTuning
 };
