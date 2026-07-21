@@ -1,9 +1,16 @@
 const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const { processNewReading } = require('./trend-detector');
 const { generateGuesses } = require('./guess-engine');
 const app = express();
+
+// Railway sits in front of this app behind a reverse proxy - without this,
+// express-rate-limit sees every request as coming from the proxy's single IP
+// (either lumping all callers into one shared bucket, or throwing on startup
+// in newer versions that detect the misconfiguration).
+app.set('trust proxy', 1);
 
 app.use(cors());
 app.use(express.json());
@@ -42,6 +49,18 @@ function requireApiKey(req, res, next) {
   next();
 }
 
+// ---- Rate limiting ----
+// Generous enough for real usage (Worker polls every ~15 min, plus manual
+// "Check now" taps and debug scenario playback bursts) while still blocking
+// a flood - anonymous or accidental - from running up the Gemini bill.
+const apiLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again shortly.' },
+});
+
 // Raw call to Gemini. Throws on API error; caller decides how to handle it.
 async function callGemini(prompt) {
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`, {
@@ -76,7 +95,7 @@ app.get('/', (req, res) => {
   res.send('Ahead backend is running.');
 });
 
-app.post('/analyze', requireApiKey, async (req, res) => {
+app.post('/analyze', apiLimiter, requireApiKey, async (req, res) => {
   try {
     const { readings, latest } = req.body;
 
@@ -141,7 +160,7 @@ function getDeviceState(deviceId) {
   return state;
 }
 
-app.get('/api/latest-trend', requireApiKey, (req, res) => {
+app.get('/api/latest-trend', apiLimiter, requireApiKey, (req, res) => {
   const deviceId = getDeviceId(req);
   if (!deviceId) {
     return res.status(400).json({ error: 'Missing X-Ahead-Device-Id header' });
@@ -153,7 +172,7 @@ app.get('/api/latest-trend', requireApiKey, (req, res) => {
   res.json(state.latestTrend);
 });
 
-app.post('/api/check-trend', requireApiKey, async (req, res) => {
+app.post('/api/check-trend', apiLimiter, requireApiKey, async (req, res) => {
   try {
     const deviceId = getDeviceId(req);
     if (!deviceId) {

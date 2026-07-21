@@ -8,8 +8,9 @@
     "test": "node --test"
   },
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^4.19.2",
-    "cors": "^2.8.5"
+    "express-rate-limit": "^8.6.0"
   },
   "engines": {
     "node": ">=18.0.0"
