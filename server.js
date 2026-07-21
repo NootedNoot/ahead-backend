@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const { processNewReading } = require('./trend-detector');
@@ -15,6 +16,31 @@ app.use((req, res, next) => {
   req.dryRun = req.body?.dryRun === true || DRY_RUN;
   next();
 });
+
+// ---- Shared-secret auth ----
+// Every real client request carries X-Ahead-Api-Key, checked against this
+// server's own env var. Fails CLOSED if the env var isn't set - a misconfigured
+// deployment should refuse traffic, not silently accept anyone.
+const AHEAD_API_KEY = process.env.AHEAD_API_KEY;
+
+function timingSafeStringEqual(a, b) {
+  const bufA = Buffer.from(String(a ?? ''), 'utf8');
+  const bufB = Buffer.from(String(b ?? ''), 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function requireApiKey(req, res, next) {
+  if (!AHEAD_API_KEY) {
+    console.error('AHEAD_API_KEY is not set - rejecting all requests to protected endpoints');
+    return res.status(500).json({ error: 'Server misconfigured' });
+  }
+  const provided = req.get('X-Ahead-Api-Key');
+  if (!provided || !timingSafeStringEqual(provided, AHEAD_API_KEY)) {
+    return res.status(401).json({ error: 'Invalid or missing API key' });
+  }
+  next();
+}
 
 // Raw call to Gemini. Throws on API error; caller decides how to handle it.
 async function callGemini(prompt) {
@@ -50,7 +76,7 @@ app.get('/', (req, res) => {
   res.send('Ahead backend is running.');
 });
 
-app.post('/analyze', async (req, res) => {
+app.post('/analyze', requireApiKey, async (req, res) => {
   try {
     const { readings, latest } = req.body;
 
@@ -97,14 +123,14 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
 let lastProcessedDate = null;
 let latestTrend = null;
 
-app.get('/api/latest-trend', (req, res) => {
+app.get('/api/latest-trend', requireApiKey, (req, res) => {
   if (!latestTrend) {
     return res.status(404).json({ error: 'No trend data yet' });
   }
   res.json(latestTrend);
 });
 
-app.post('/api/check-trend', async (req, res) => {
+app.post('/api/check-trend', requireApiKey, async (req, res) => {
   try {
     const { readings, tuning } = req.body;
 
