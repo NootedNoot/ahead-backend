@@ -117,21 +117,50 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
   }
 });
 
-// In-memory only - resets on restart/redeploy. Fine for a single-user,
-// single-process deployment; if this ever runs multi-instance or needs to
-// survive restarts without a brief catch-up gap, move this to a real store.
-let lastProcessedDate = null;
-let latestTrend = null;
+// In-memory only - resets on restart/redeploy. Keyed per-device (see
+// getDeviceState below) rather than two bare globals: with more than one
+// device hitting this same deployment (multi-user beta testing, or anyone
+// else who finds the URL), a shared global would let one caller's readings
+// overwrite another's - at best cross-contaminated trend data, at worst a
+// forged far-future timestamp silently swallowing a real subsequent reading
+// (see the newReadings filter below) or a forged severity firing a false
+// alert on someone else's device. If this ever runs multi-instance, move
+// this to a real store - a single process's Map won't survive that.
+const deviceStates = new Map();
+
+function getDeviceId(req) {
+  return req.get('X-Ahead-Device-Id') || null;
+}
+
+function getDeviceState(deviceId) {
+  let state = deviceStates.get(deviceId);
+  if (!state) {
+    state = { lastProcessedDate: null, latestTrend: null };
+    deviceStates.set(deviceId, state);
+  }
+  return state;
+}
 
 app.get('/api/latest-trend', requireApiKey, (req, res) => {
-  if (!latestTrend) {
+  const deviceId = getDeviceId(req);
+  if (!deviceId) {
+    return res.status(400).json({ error: 'Missing X-Ahead-Device-Id header' });
+  }
+  const state = deviceStates.get(deviceId);
+  if (!state || !state.latestTrend) {
     return res.status(404).json({ error: 'No trend data yet' });
   }
-  res.json(latestTrend);
+  res.json(state.latestTrend);
 });
 
 app.post('/api/check-trend', requireApiKey, async (req, res) => {
   try {
+    const deviceId = getDeviceId(req);
+    if (!deviceId) {
+      return res.status(400).json({ error: 'Missing X-Ahead-Device-Id header' });
+    }
+    const state = getDeviceState(deviceId);
+
     const { readings, tuning } = req.body;
 
     if (!Array.isArray(readings) || readings.length < 2) {
@@ -140,9 +169,9 @@ app.post('/api/check-trend', requireApiKey, async (req, res) => {
 
     const sorted = [...readings].sort((a, b) => a.date - b.date);
 
-    const newReadings = lastProcessedDate === null
+    const newReadings = state.lastProcessedDate === null
       ? [sorted[sorted.length - 1]]
-      : sorted.filter(r => r.date > lastProcessedDate);
+      : sorted.filter(r => r.date > state.lastProcessedDate);
 
     if (newReadings.length === 0) {
       return res.json({ processed: [] });
@@ -194,8 +223,8 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
       results.push({ date: reading.date, ...result, guesses });
     }
 
-    lastProcessedDate = newReadings[newReadings.length - 1].date;
-    latestTrend = results[results.length - 1];
+    state.lastProcessedDate = newReadings[newReadings.length - 1].date;
+    state.latestTrend = results[results.length - 1];
 
     res.json({ processed: results });
 
