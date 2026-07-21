@@ -1,8 +1,9 @@
 // Run with: npm test  (node --test)
 // Zero-dependency tests via node:test. Guards the proximity-first severity
-// tiering: severity keys off where glucose is PROJECTED to land, not how fast
-// it's moving. Rate only escalates through the extended-horizon nudge, which is
-// direction-aware, so mildly-high-but-falling values don't fire noise.
+// tiering: severity primarily keys off where glucose is PROJECTED to land, but
+// a sufficiently fast rate (YELLOW_RATE_FALLING/YELLOW_RATE_RISING) escalates to
+// yellow on its own too. The extended-horizon nudge is direction-aware, so
+// mildly-high-but-falling values (at an ordinary pace) don't fire noise.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -265,6 +266,34 @@ test('projected boundary: 250 is red, 249 is yellow', () => {
 
 test('mid-range projection with no danger extrapolation is none', () => {
   assert.equal(classifySeverity({ currentValue: 120, rate: 0.2, projected: 123, projectedExtended: 126 }), 'none');
+});
+
+// ---- classifySeverity: rate-based yellow escalation ----
+
+test('144 falling -2.3/min is yellow even though both projections land safe', () => {
+  const severity = classifySeverity({
+    currentValue: 144, rate: -2.3, projected: 110, projectedExtended: 75,
+  });
+  assert.equal(severity, 'yellow');
+});
+
+test('rate boundary: -1.5 is yellow, -1.4 is none (projection otherwise safe)', () => {
+  const base = { currentValue: 120, projected: 111, projectedExtended: 100 };
+  assert.equal(classifySeverity({ ...base, rate: -1.5 }), 'yellow');
+  assert.equal(classifySeverity({ ...base, rate: -1.4 }), 'none');
+});
+
+test('rate boundary: 2.5 is yellow, 2.4 is none (projection otherwise safe)', () => {
+  const base = { currentValue: 120, projected: 150, projectedExtended: 180 };
+  assert.equal(classifySeverity({ ...base, rate: 2.5 }), 'yellow');
+  assert.equal(classifySeverity({ ...base, rate: 2.4 }), 'none');
+});
+
+test('a fast rate never downgrades an already-RED reading', () => {
+  assert.equal(
+    classifySeverity({ currentValue: 65, rate: -3, projected: 50, projectedExtended: 20 }),
+    'red',
+  );
 });
 
 // ---- processNewReading integration (unchanged rate/projection math) ----
