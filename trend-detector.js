@@ -29,10 +29,11 @@ const TREND_PHASE_NOISE_FLOOR = 0.3; // mg/dL/min - smaller diffs than this = ju
 const OUT_OF_RANGE_LOW = 80;
 const OUT_OF_RANGE_HIGH = 160;
 
-// Severity is proximity-based: it keys off where glucose is PROJECTED to land,
-// not how fast it's moving. Rate is shown as context but never escalates on its
-// own while the projection stays in a safe range.
-//   Yellow: projection approaching a caution zone.
+// Severity is primarily proximity-based: it keys off where glucose is PROJECTED
+// to land. Rate is normally just context, but a sufficiently fast rate now also
+// escalates to yellow on its own, regardless of projection - see
+// YELLOW_RATE_FALLING/YELLOW_RATE_RISING below.
+//   Yellow: projection approaching a caution zone, OR rate fast enough on its own.
 //   Red:    projection crossing a real danger threshold.
 const YELLOW_PROJECTED_LOW = 90;
 const YELLOW_PROJECTED_HIGH = 200;
@@ -40,8 +41,17 @@ const RED_PROJECTED_LOW = 70;
 const RED_PROJECTED_HIGH = 250;
 
 // Hard actual-value floor: at or below this, severity is RED no matter what the
-// projection says (see classifySeverity). 54 = the clinical level-2 hypo cutoff.
+// projection says (see classifySeverity). Raised from the clinical 54 cutoff to
+// 60 so RED fires before glucose is already deep in the hole, not right at it.
 const SEVERE_LOW_RED_FLOOR = 60;
+
+// Rate-based yellow escalation: independent of projection. A drop/climb this
+// fast deserves at least yellow right now even when both projections happen
+// to land back in the safe band (e.g. a fast fall from a high starting
+// point, like -2.3 mg/dL/min from 144, whose 15/30-min projections alone
+// don't cross YELLOW_PROJECTED_LOW).
+const YELLOW_RATE_FALLING = -1.5;
+const YELLOW_RATE_RISING = 2.5;
 
 const DEFAULT_TUNING = Object.freeze({
   yellowProjectedLow: YELLOW_PROJECTED_LOW,
@@ -272,11 +282,13 @@ function getTrendPhase(recentRate, priorRate) {
 /**
  * The core decision: what severity does this moment deserve.
  *
- * Proximity-first: severity is a function of where glucose is PROJECTED to land,
- * not how fast it's moving. Velocity only escalates through the extended-horizon
- * nudge below, which is inherently direction-aware (extrapolating the real slope
- * further out) - so a value that's merely high-but-falling toward safe stays
- * 'none' instead of firing a pointless warning.
+ * Proximity-first: severity is primarily a function of where glucose is
+ * PROJECTED to land. Velocity escalates it two ways: directly, when the rate
+ * itself crosses YELLOW_RATE_FALLING/YELLOW_RATE_RISING (fast enough to matter
+ * regardless of where the projection lands); and through the extended-horizon
+ * nudge below, which is direction-aware (extrapolating the real slope further
+ * out) - so a value that's merely high-but-falling toward safe, at an ordinary
+ * pace, stays 'none' instead of firing a pointless warning.
  */
 function classifySeverity({ currentValue, rate, projected, projectedExtended, redProjected, allowRed = true, tuning }) {
   const params = resolveTuning(tuning);
@@ -304,6 +316,10 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, re
       (currentValue >= params.redProjectedHigh && rate > 0);
     if (projectedRed || worseningInDanger) return 'red';
   }
+
+  // YELLOW: a sufficiently fast rate escalates on its own, regardless of where
+  // the projection lands - see YELLOW_RATE_FALLING/RISING above.
+  if (rate <= YELLOW_RATE_FALLING || rate >= YELLOW_RATE_RISING) return 'yellow';
 
   // YELLOW: the projection is approaching a caution zone, OR the current slope
   // extended to the longer horizon would reach red territory (early warning on a
@@ -423,6 +439,8 @@ module.exports = {
   YELLOW_PROJECTED_LOW,
   YELLOW_PROJECTED_HIGH,
   RED_PROJECTED_LOW,
+  YELLOW_RATE_FALLING,
+  YELLOW_RATE_RISING,
   RED_PROJECTED_HIGH,
   SEVERE_LOW_RED_FLOOR
   ,DEFAULT_TUNING
