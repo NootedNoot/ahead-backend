@@ -69,6 +69,18 @@ function generateGuesses(context) {
     if (Math.abs(rate) < 0.5) {
       guesses.push({ label: 'Slow drift low - a snack worth considering?', confidence: 'low' });
     }
+    // Compression lows are a well-known CGM artifact: pressure on the sensor
+    // site (lying on it, tight clothing) can squeeze interstitial fluid flow
+    // and report a falsely low value, classically overnight. Nighttime window
+    // mirrors the existing dawn-phenomenon check's use of timeOfDayHour above.
+    // Not gated on any fingerstick value - no such input exists yet - this is
+    // a standing possible-explanation prompt for a low in that window.
+    if (context.timeOfDayHour >= 0 && context.timeOfDayHour <= 6) {
+      guesses.push({
+        label: 'Possible compression low - any pressure on the sensor site (sitting, lying on it, tight clothing)?',
+        confidence: 'low',
+      });
+    }
 
     /* ===== BOLUS-DEPENDENT LOW-SIDE GUESSES - DISABLED ===================
        Enable alongside the high-side block above when bolus logging lands.
@@ -85,6 +97,22 @@ function generateGuesses(context) {
   // pattern" - which is exactly what live testing hit.
   if (reboundingFromLow(readings, rate)) {
     guesses.push({ label: 'Possible rebound from a recent low?', confidence: 'medium' });
+  }
+
+  // Sensor/fingerstick mismatch: the sensor reads interstitial fluid, which
+  // trails actual blood glucose by several minutes, so a fingerstick can
+  // meaningfully disagree with the sensor trend during a fast move in either
+  // direction - a fast rise means blood glucose may already be higher than
+  // shown, a fast fall means it may already be lower. Deliberately not gated
+  // on an actual fingerstick reading (none is logged yet, out of scope for
+  // this pass) - this is a standing possible-explanation prompt for events
+  // fast enough that the lag is worth asking about. Checked regardless of
+  // band, same as the rebound check above.
+  if (Math.abs(rate) >= 1.5) {
+    guesses.push({
+      label: 'Interstitial fluid lag - could your blood glucose already be ahead of what the sensor shows?',
+      confidence: 'low',
+    });
   }
 
   if (guesses.length === 0) {

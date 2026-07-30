@@ -71,6 +71,31 @@ test('every active event has at least three question-form hypotheses for the exp
   assert.ok(g.every(x => x.label.trim().endsWith('?')));
 });
 
+test('fast fall suggests interstitial fluid lag', () => {
+  const g = generateGuesses(ctx({ currentValue: 68, rate: -1.8, severity: 'red', readings: readings([100, 68]) }));
+  assert.ok(g.some(x => x.label === 'Interstitial fluid lag - could your blood glucose already be ahead of what the sensor shows?'));
+});
+
+test('fast rise suggests interstitial fluid lag too (direction-agnostic)', () => {
+  const g = generateGuesses(ctx({ currentValue: 210, rate: 2.0, readings: readings([170, 210]) }));
+  assert.ok(g.some(x => x.label === 'Interstitial fluid lag - could your blood glucose already be ahead of what the sensor shows?'));
+});
+
+test('moderate rate does not suggest interstitial lag', () => {
+  const g = generateGuesses(ctx({ currentValue: 68, rate: -1.0, severity: 'red', readings: readings([90, 68]) }));
+  assert.ok(!g.some(x => /interstitial/i.test(x.label)));
+});
+
+test('overnight low suggests possible compression low', () => {
+  const g = generateGuesses(ctx({ currentValue: 68, rate: -0.2, severity: 'red', timeOfDayHour: 3, readings: readings([72, 68]) }));
+  assert.ok(g.some(x => x.label === 'Possible compression low - any pressure on the sensor site (sitting, lying on it, tight clothing)?'));
+});
+
+test('daytime low does not suggest compression low', () => {
+  const g = generateGuesses(ctx({ currentValue: 68, rate: -0.2, severity: 'red', timeOfDayHour: 14, readings: readings([72, 68]) }));
+  assert.ok(!g.some(x => /compression/i.test(x.label)));
+});
+
 test('eventful with no matching rule starts with no-clear-pattern and supplies the expandable prompts', () => {
   // Out-of-range (sustained) but no directional rule matches.
   const g = generateGuesses(ctx({ currentValue: 170, rate: 0, severity: 'none', readings: readings([170, 170]) }));
