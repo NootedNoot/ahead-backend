@@ -99,7 +99,7 @@ test('buildNotificationMessage shows both projection windows', () => {
 // ---- integration: don't weaken a genuine climb, do suppress a noisy spike ----
 
 function stubDeps() {
-  return { deps: { sendPushNotification: async () => {}, callGeminiForAnalysis: async () => ({}) } };
+  return { deps: { sendPushNotification: async () => {} } };
 }
 
 test("real sustained climb (tonight's case) still fires RED", async () => {
@@ -311,7 +311,6 @@ function stubs() {
     pushCalls,
     deps: {
       sendPushNotification: async (msg) => { pushCalls.push(msg); },
-      callGeminiForAnalysis: async () => ({}),
     },
   };
 }

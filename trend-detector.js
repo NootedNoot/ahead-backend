@@ -352,7 +352,7 @@ function buildNotificationMessage(severity, currentValue, rate, projected, proje
  * Main entry point. Call this after every new reading is stored.
  * readings: full array, sorted oldest -> newest, each { sgv, date }
  */
-async function processNewReading(readings, { sendPushNotification, callGeminiForAnalysis, tuning }) {
+async function processNewReading(readings, { sendPushNotification, tuning }) {
   if (!readings || readings.length < 2) return { severity: 'none' };
 
   const current = readings[readings.length - 1];
@@ -390,17 +390,10 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
 
   const notificationMessage = buildNotificationMessage(severity, current.sgv, overallRate, projected, projectedExtended, params.extendedProjectionMinutes);
 
-  const [pushResult, geminiResult] = await Promise.allSettled([
-    sendPushNotification(notificationMessage),
-    callGeminiForAnalysis({
-      currentValue: current.sgv,
-      rate: overallRate,
-      trendPhase,
-      severity,
-      projected,
-      recentReadings: readings.slice(-6)
-    })
-  ]);
+  const pushResult = await sendPushNotification(notificationMessage).then(
+    (value) => ({ status: 'fulfilled', value }),
+    (reason) => ({ status: 'rejected', reason })
+  );
 
   return {
     severity,
@@ -416,8 +409,7 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
     consecutiveOutOfRange,
     tuning: params,
     notificationMessage,
-    pushResult,
-    geminiResult
+    pushResult
   };
 }
 
