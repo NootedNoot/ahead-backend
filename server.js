@@ -12,7 +12,12 @@ const app = express();
 // in newer versions that detect the misconfiguration).
 app.set('trust proxy', 1);
 
-app.use(cors());
+// Restricted to ahead-dashboard's actual origin (no CNAME in that repo, so
+// it's served at GitHub Pages' default nootednoot.github.io) rather than the
+// wide-open default - browsers won't hand a response back to JS on any other
+// origin. Doesn't affect non-browser callers (the Android app, curl) since
+// CORS is enforced client-side by the browser, not this server.
+app.use(cors({ origin: 'https://nootednoot.github.io' }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -154,6 +159,13 @@ app.post('/api/check-trend', apiLimiter, requireApiKey, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Ahead backend listening on port ${PORT}`);
-});
+// Only actually bind a port when run directly (node server.js / npm start) -
+// requiring this file from a test just wants the app object, not a live
+// listener on a real port.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Ahead backend listening on port ${PORT}`);
+  });
+}
+
+module.exports = app;

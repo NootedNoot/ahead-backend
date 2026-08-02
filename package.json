@@ -1,7 +1,7 @@
 {
   "name": "ahead-backend",
   "version": "1.0.0",
-  "description": "Secure backend for Ahead - holds Claude API key and analyzes glucose data",
+  "description": "Secure backend for Ahead - server-side trend detection and glucose data processing",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -14,5 +14,8 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.2.2"
   }
 }
