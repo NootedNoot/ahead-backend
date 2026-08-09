@@ -120,6 +120,38 @@ test('a noisy bouncing spike does not fire RED - waits as YELLOW', async () => {
   assert.equal(result.severity, 'yellow');
 });
 
+// ---- default decay on a fast, still-accelerating RISE (asymmetric - falls never get this) ----
+
+test('fast accelerating RISE (consistent trajectory) decays redProjected below the flat projection', async () => {
+  const { deps } = stubDeps();
+  const now = Date.now();
+  // Constant +3.0 mg/dL/min - fast enough to trigger default decay
+  // (>= PROJECTION_DECAY_RATE_THRESHOLD), and a flat rate history like this
+  // reads as 'consistent' (not decelerating), so this is exactly the case
+  // that used to hold flat with zero curve.
+  const readings = [180, 195, 210, 225, 240].map((sgv, i) => ({ sgv, date: now - (4 - i) * 5 * 60 * 1000 }));
+  const result = await processNewReading(readings, deps);
+  assert.equal(result.rateTrajectory, 'consistent');
+  assert.ok(result.rate >= 2.0, `expected a fast rise, got rate=${result.rate}`);
+  assert.ok(
+    result.redProjected < result.projected,
+    `expected decayed redProjected (${result.redProjected}) below the flat projected (${result.projected})`,
+  );
+});
+
+test('fast accelerating FALL (consistent trajectory) leaves redProjected exactly flat', async () => {
+  const { deps } = stubDeps();
+  const now = Date.now();
+  // Mirror of the rise case above - constant -3.0 mg/dL/min. Falls must never
+  // get default decay: redProjected stays identical to the flat projection,
+  // unchanged from current behavior, regardless of speed.
+  const readings = [240, 225, 210, 195, 180].map((sgv, i) => ({ sgv, date: now - (4 - i) * 5 * 60 * 1000 }));
+  const result = await processNewReading(readings, deps);
+  assert.equal(result.rateTrajectory, 'consistent');
+  assert.ok(result.rate <= -2.0, `expected a fast fall, got rate=${result.rate}`);
+  assert.equal(result.redProjected, result.projected);
+});
+
 test('debug tuning overrides server defaults for one request without mutating defaults', () => {
   assert.equal(
     classifySeverity({ currentValue: 120, rate: 0.5, projected: 205, projectedExtended: 210 }),
@@ -205,8 +237,10 @@ test('210 falling -1 (projected 195) toward safe stays none - direction matters'
 
 // ---- yellow via approaching a caution zone ----
 
-test('projection drifting toward low caution zone (85) is yellow', () => {
-  assert.equal(classifySeverity({ currentValue: 100, rate: -1, projected: 85, projectedExtended: 70 }), 'yellow');
+test('projection drifting toward low caution zone (75) is yellow', () => {
+  // projectedExtended held safely above RED_PROJECTED_LOW so this isolates
+  // the plain proximity check from the extended-horizon nudge tested below.
+  assert.equal(classifySeverity({ currentValue: 100, rate: -1, projected: 75, projectedExtended: 95 }), 'yellow');
 });
 
 test('projection drifting toward high caution zone (205) is yellow', () => {
@@ -240,10 +274,13 @@ test('already low (65) but recovering (rising) is not red - yellow from proximit
 
 // ---- boundaries ----
 
-test('projected boundary: 90 is yellow, 91 is none', () => {
+test('projected boundary: 80 is yellow, 81 is none', () => {
   const base = { currentValue: 110, rate: -1 };
-  assert.equal(classifySeverity({ ...base, projected: 90, projectedExtended: 80 }), 'yellow');
-  assert.equal(classifySeverity({ ...base, projected: 91, projectedExtended: 82 }), 'none');
+  // projectedExtended held at 75 (safely above RED_PROJECTED_LOW) in both
+  // cases so this isolates the plain proximity check from the separate
+  // extended-horizon nudge tested elsewhere.
+  assert.equal(classifySeverity({ ...base, projected: 80, projectedExtended: 75 }), 'yellow');
+  assert.equal(classifySeverity({ ...base, projected: 81, projectedExtended: 75 }), 'none');
 });
 
 test('projected boundary: 200 is yellow, 199 is none', () => {
