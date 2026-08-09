@@ -35,7 +35,15 @@ const OUT_OF_RANGE_HIGH = 160;
 // YELLOW_RATE_FALLING/YELLOW_RATE_RISING below.
 //   Yellow: projection approaching a caution zone, OR rate fast enough on its own.
 //   Red:    projection crossing a real danger threshold.
-const YELLOW_PROJECTED_LOW = 90;
+// 2026-08-08: lowered low-side from 90 to 80 - owner reported it firing on a
+// flat/stable ~90-94 (rate well within the +-1.0 FLAT band, see
+// GlucoseTrendArrow.kt) with hours of no real change, just ordinary noise
+// nudging the 15-min projection a point or two under 90. A fast real drop is
+// still caught two other ways regardless of this constant: YELLOW_RATE_FALLING
+// below (rate <= -1.5, independent of projection) and RED_PROJECTED_LOW (70,
+// unchanged) once the decline is actually significant - this only narrows the
+// slow/flat-proximity band, not the fast-drop path.
+const YELLOW_PROJECTED_LOW = 80;
 const YELLOW_PROJECTED_HIGH = 200;
 const RED_PROJECTED_LOW = 70;
 const RED_PROJECTED_HIGH = 250;
@@ -52,6 +60,17 @@ const SEVERE_LOW_RED_FLOOR = 60;
 // don't cross YELLOW_PROJECTED_LOW).
 const YELLOW_RATE_FALLING = -1.5;
 const YELLOW_RATE_RISING = 2.5;
+
+// Default decay for RED's projection on a fast, still-accelerating RISE (not
+// yet confirmed 'decelerating' by assessRateTrajectory). Without this,
+// projectGlucose holds the rate flat for the whole window, so a genuinely
+// fast rise overshoots real-world projections with zero curve. Deliberately
+// one-sided: falling projections never get default decay here, only ever the
+// trajectory-confirmed 'decelerating' decay above - underestimating a RED low
+// is far more dangerous than underestimating a RED high, since a rise has a
+// natural brake (insulin catching up) a fall does not.
+const PROJECTION_DECAY_RATE_THRESHOLD = 2.0; // mg/dL/min - below this, hold flat as before
+const DEFAULT_DECAY_PER_STEP = 0.3; // mg/dL/min eased off per 5-min step, mild default
 
 const DEFAULT_TUNING = Object.freeze({
   yellowProjectedLow: YELLOW_PROJECTED_LOW,
@@ -93,6 +112,46 @@ function resolveTuning(input) {
   };
 }
 
+// How close together (and how similar in value) two readings have to be to
+// be treated as the same underlying CGM sample rather than two real
+// consecutive readings - mirrors ahead-rate-math's Kotlin collapseDuplicates
+// exactly (see that module's golden-vectors/ for the shared spec both sides
+// are tested against). Added 2026-08-08: ahead-android's on-device
+// HealthConnectManager already had this protection after the real
+// 2026-08-03 incident (two writer apps flooding Health Connect with
+// near-duplicate records, sometimes sharing the exact same timestamp) - this
+// backend had no equivalent, so the same class of glitch could still divide
+// by a near-zero-second gap here and silently corrupt a severity decision or
+// push notification, even though the on-device display had already been
+// fixed. A real CGM never reports two different values within a few seconds
+// of each other, so collapsing same-value readings inside a short window is
+// safe - it can only ever merge duplicate writes, never two genuinely
+// different consecutive samples.
+const DUPLICATE_MERGE_WINDOW_SECONDS = 90;
+
+/**
+ * Collapses consecutive readings that look like the same underlying CGM
+ * sample written by more than one source - see
+ * DUPLICATE_MERGE_WINDOW_SECONDS above. Keeps the LATER of the two
+ * timestamps (closer to "when this was actually learned"); sgv is identical
+ * either way since they're treated as one sample. readings must already be
+ * sorted oldest -> newest.
+ */
+function collapseDuplicateReadings(readings, mergeWindowSeconds = DUPLICATE_MERGE_WINDOW_SECONDS) {
+  const mergeWindowMs = mergeWindowSeconds * 1000;
+  const result = [];
+  for (const reading of readings) {
+    const last = result[result.length - 1];
+    const isDuplicate = last && last.sgv === reading.sgv && Math.abs(reading.date - last.date) <= mergeWindowMs;
+    if (isDuplicate) {
+      result[result.length - 1] = reading;
+    } else {
+      result.push(reading);
+    }
+  }
+  return result;
+}
+
 /**
  * Rate of change (mg/dL/min) using the oldest and newest reading inside a
  * window ending at windowEndTime, going back windowMinutes.
@@ -100,7 +159,7 @@ function resolveTuning(input) {
  */
 function rateInWindow(readings, windowEndTime, windowMinutes) {
   const cutoff = windowEndTime - windowMinutes * 60 * 1000;
-  const inWindow = readings.filter(r => r.date > cutoff && r.date <= windowEndTime);
+  const inWindow = collapseDuplicateReadings(readings.filter(r => r.date > cutoff && r.date <= windowEndTime));
 
   if (inWindow.length < 2) return null;
 
@@ -138,18 +197,24 @@ function pointToPointRate(from, to) {
  * than let an older upward interval mask a fresh drop (or vice versa).
  */
 function calculateRate(readings, smoothingIntervals = DEFAULT_TUNING.smoothingIntervals) {
-  if (readings.length < 2) return null;
+  // Dedupe first, not just as a precondition callers have to remember - see
+  // DUPLICATE_MERGE_WINDOW_SECONDS's doc. This makes calculateRate safe to
+  // call directly from anywhere (tests, recentRates' slicing, future
+  // callers) without depending on the caller having pre-cleaned its input,
+  // matching ahead-rate-math's Kotlin ratePerMinute doing the same.
+  const deduped = collapseDuplicateReadings(readings);
+  if (deduped.length < 2) return null;
 
-  const latest = readings[readings.length - 1];
-  const prev = readings[readings.length - 2];
+  const latest = deduped[deduped.length - 1];
+  const prev = deduped[deduped.length - 2];
   const recentRate = pointToPointRate(prev, latest);
   if (recentRate === null) return null;
 
   // A one-interval tuning explicitly opts out of smoothing. Otherwise, not
   // enough history to smooth means the newest interval is all we have.
-  if (smoothingIntervals < 2 || readings.length < 3) return recentRate;
+  if (smoothingIntervals < 2 || deduped.length < 3) return recentRate;
 
-  const prev2 = readings[readings.length - 3];
+  const prev2 = deduped[deduped.length - 3];
   const priorRate = pointToPointRate(prev2, prev);
   if (priorRate === null) return recentRate;
 
@@ -321,6 +386,16 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, re
   // the projection lands - see YELLOW_RATE_FALLING/RISING above.
   if (rate <= YELLOW_RATE_FALLING || rate >= YELLOW_RATE_RISING) return 'yellow';
 
+  // YELLOW: currently below the ordinary low line right now (61-70; 60 and
+  // under is already RED via the hard floor above), independent of
+  // yellowProjectedLow. 2026-08-08: yellowProjectedLow was lowered from 90 to
+  // 80 so a comfortably-normal, flat ~90-94 stops tripping yellow on noise -
+  // but a real recovering low (e.g. currentValue 65, rising, projected 85)
+  // must not go silent just because its projection now clears the
+  // proximity line faster than it clears the actual danger band. Being at
+  // 61-70 is still a real low in the moment, rising or not.
+  if (currentValue <= params.redProjectedLow) return 'yellow';
+
   // YELLOW: the projection is approaching a caution zone, OR the current slope
   // extended to the longer horizon would reach red territory (early warning on a
   // genuinely fast move - the extended projection encodes direction, so it can't
@@ -374,8 +449,17 @@ async function processNewReading(readings, { sendPushNotification, tuning }) {
   // the flat projection (see the RED-projection confirmation helpers above).
   const rateHistory = recentRates(readings, 3, params.smoothingIntervals);
   const trajectory = assessRateTrajectory(rateHistory);
-  const redProjected = trajectory.kind === 'decelerating'
-    ? projectWithDecay(current.sgv, overallRate, trajectory.avgDeltaPerStep, PROJECTION_MINUTES)
+  // Decay-by-default only applies to fast RISING rates that aren't already
+  // confirmed decelerating. Falling rates never get default decay - they keep
+  // the flat, worst-case projection regardless of speed, since an underestimated
+  // low is more dangerous than an underestimated high.
+  const isFastRising = overallRate >= PROJECTION_DECAY_RATE_THRESHOLD;
+  const decayPerStep = trajectory.kind === 'decelerating'
+    ? trajectory.avgDeltaPerStep
+    : (isFastRising ? -DEFAULT_DECAY_PER_STEP : 0);
+
+  const redProjected = decayPerStep !== 0
+    ? projectWithDecay(current.sgv, overallRate, decayPerStep, PROJECTION_MINUTES)
     : projected;
   const allowRed = trajectory.kind !== 'noisy';
 
@@ -416,6 +500,8 @@ async function processNewReading(readings, { sendPushNotification, tuning }) {
 module.exports = {
   calculateRate,
   pointToPointRate,
+  collapseDuplicateReadings,
+  DUPLICATE_MERGE_WINDOW_SECONDS,
   recentRates,
   assessRateTrajectory,
   projectWithDecay,
