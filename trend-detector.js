@@ -255,27 +255,43 @@ function recentRates(readings, count, smoothingIntervals) {
 
 /**
  * Classifies the recent rate trajectory:
- *  - 'consistent'   : same direction, no wild magnitude swings -> trust the flat
+ *  - 'consistent'   : the two most recent rates agree (same direction, no wild
+ *                     swing between just the two of them) -> trust the flat
  *                     projection and let RED fire as normal.
- *  - 'decelerating' : same direction but each rate is gently easing off -> decay
- *                     the projection instead of holding the rate flat.
- *  - 'noisy'        : a sign flip or a >50% jump between consecutive rates -> a
- *                     single reading shouldn't decide RED; wait for confirmation.
+ *  - 'decelerating' : same direction across the whole window and each rate is
+ *                     gently easing off -> decay the projection instead of
+ *                     holding the rate flat.
+ *  - 'noisy'        : the LATEST rate disagrees with the one right before it -
+ *                     a sign flip or a >50% jump between just those two -> the
+ *                     newest reading alone shouldn't decide RED; wait for the
+ *                     next one to confirm it.
  * With fewer than 3 rates we can't confirm, so we default to 'consistent' - RED
  * suppression must never make us MISS a genuine fast climb on thin history.
+ *
+ * 2026-08-11: deliberately scoped to only the most recent pair, not every
+ * adjacent pair in the window. It used to be that ANY sign flip or big swing
+ * anywhere in the 3-rate window - even one two readings back that the latest
+ * two have since agreed on - forced 'noisy' and vetoed RED for the whole
+ * window. Real incident: rates [+2.0, -3.4, -4.1] (a value that had been
+ * rising, then turned hard into a real, accelerating fall) got stuck at
+ * 'noisy' purely because of the OLD +2.0->-3.4 flip, even though the two most
+ * recent rates fully agreed with each other and the fall kept getting worse -
+ * this held a currentValue=89, projected=28 case to YELLOW when it should
+ * have been RED. A reversal that's already been confirmed twice in a row
+ * isn't noise, it's exactly what a real crash looks like at its onset. The
+ * 'decelerating' path's own decreasing-magnitude check below is untouched and
+ * still requires the WHOLE window to agree before easing a projection -
+ * this change only makes it easier to trust a genuinely confirmed escalation,
+ * never easier to trust an optimistic deceleration.
  */
 function assessRateTrajectory(rates) {
   if (rates.length < 3) return { kind: 'consistent', avgDeltaPerStep: 0 };
 
-  let signChange = false;
-  let bigSwing = false;
-  for (let i = 1; i < rates.length; i++) {
-    const prev = rates[i - 1];
-    const cur = rates[i];
-    if (Math.sign(prev) !== 0 && Math.sign(cur) !== 0 && Math.sign(prev) !== Math.sign(cur)) signChange = true;
-    const base = Math.abs(prev);
-    if (base === 0 ? cur !== 0 : Math.abs(cur - prev) / base > 0.5) bigSwing = true;
-  }
+  const prev = rates[rates.length - 2];
+  const latest = rates[rates.length - 1];
+  const signChange = Math.sign(prev) !== 0 && Math.sign(latest) !== 0 && Math.sign(prev) !== Math.sign(latest);
+  const base = Math.abs(prev);
+  const bigSwing = base === 0 ? latest !== 0 : Math.abs(latest - prev) / base > 0.5;
   if (signChange || bigSwing) return { kind: 'noisy', avgDeltaPerStep: 0 };
 
   const decreasing = rates.every((r, i) => i === 0 || Math.abs(r) < Math.abs(rates[i - 1]));

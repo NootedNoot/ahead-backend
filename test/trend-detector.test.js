@@ -56,12 +56,28 @@ test('trajectory: gently easing climb is decelerating with a negative delta', ()
   assert.ok(t.avgDeltaPerStep < 0);
 });
 
-test('trajectory: a sign flip is noisy', () => {
+test('trajectory: a sign flip in the latest pair is noisy', () => {
   assert.equal(assessRateTrajectory([2.0, -1.0, 1.5]).kind, 'noisy');
 });
 
-test('trajectory: a >50% magnitude swing is noisy even if monotonic', () => {
-  assert.equal(assessRateTrajectory([3.0, 1.0, 0.8]).kind, 'noisy');
+test('trajectory: a >50% magnitude swing in the latest pair is noisy', () => {
+  assert.equal(assessRateTrajectory([1.0, 1.0, 0.4]).kind, 'noisy');
+});
+
+test('trajectory: an older sign flip confirmed by the latest pair is NOT noisy (2026-08-11 fix)', () => {
+  // Real incident: rising at +2.0, then a real, accelerating fall (-3.4, -4.1).
+  // The two most recent rates agree with each other - an old, already-resolved
+  // reversal must not keep vetoing RED. Was 'noisy' before this fix.
+  const t = assessRateTrajectory([2.0, -3.4, -4.1]);
+  assert.equal(t.kind, 'consistent');
+});
+
+test('trajectory: an older big swing confirmed by the latest pair is NOT noisy (2026-08-11 fix)', () => {
+  // Was 'noisy' before this fix (the 1.0->2.0 swing tainted the whole window
+  // even though 2.0->2.1 confirms it). Magnitude is still growing, not
+  // shrinking, so this reads consistent, not decelerating.
+  const t = assessRateTrajectory([1.0, 2.0, 2.1]);
+  assert.equal(t.kind, 'consistent');
 });
 
 test('trajectory: fewer than 3 rates defaults to consistent (never suppress RED on thin history)', () => {
@@ -79,6 +95,20 @@ test('classifySeverity: noisy trajectory (allowRed=false) downgrades a would-be 
   const base = { currentValue: 260, rate: 2.8, projected: 302, projectedExtended: 340 };
   assert.equal(classifySeverity({ ...base, allowRed: true }), 'red');
   assert.equal(classifySeverity({ ...base, allowRed: false }), 'yellow');
+});
+
+test('real incident (2026-08-11): a rise that turns into a real, accelerating fall now fires RED', async () => {
+  // Exact shape of the real case: 121 -> 130 (rising) -> 113 -> 89 (falling
+  // hard and accelerating). Before the 2026-08-11 fix, the +rate -> -rate
+  // flip between the first two intervals flagged the whole window 'noisy'
+  // and held this at YELLOW despite a projected value of 28 - dramatically
+  // past the RED_PROJECTED_LOW line of 70.
+  const { deps } = stubDeps();
+  const now = Date.now();
+  const readings = [121, 130, 113, 89].map((sgv, i) => ({ sgv, date: now - (3 - i) * 5 * 60 * 1000 }));
+  const result = await processNewReading(readings, deps);
+  assert.equal(result.rateTrajectory, 'consistent');
+  assert.equal(result.severity, 'red');
 });
 
 test('classifySeverity: a decayed redProjected under the red band yields YELLOW not RED', () => {
