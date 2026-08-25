@@ -43,11 +43,33 @@ test('dropping low suggests exercise', () => {
   assert.ok(g.some(x => x.label === 'Recent exercise pulling you down?'));
 });
 
-test('bolus-dependent guesses are DISABLED (commented out) until logging exists', () => {
-  // A stubborn high with no recent bolus would trigger "missed bolus?" once the
-  // bolus block is enabled - it must NOT appear while that block is commented.
+test('bolus-dependent guesses (2026-08-25): a stubborn high with no logged bolus gets a low-confidence missed-bolus prompt', () => {
   const g = generateGuesses(ctx({ currentValue: 260, rate: 0.1, minutesSinceLastBolus: null, readings: readings([258, 260]) }));
-  assert.ok(!g.some(x => /bolus/i.test(x.label)), 'no bolus guesses while disabled');
+  const missed = g.find(x => x.label === 'Possible missed or late bolus?');
+  assert.ok(missed, 'missed-bolus guess present on null (never logged)');
+  assert.equal(missed.confidence, 'low', 'null is a weaker signal than a confirmed long gap');
+});
+
+test('bolus-dependent guesses: a stubborn high with a bolus logged >180 min ago gets a high-confidence missed-bolus prompt', () => {
+  const g = generateGuesses(ctx({ currentValue: 260, rate: 0.1, minutesSinceLastBolus: 200, readings: readings([258, 260]) }));
+  const missed = g.find(x => x.label === 'Possible missed or late bolus?');
+  assert.ok(missed, 'missed-bolus guess present past 180 min');
+  assert.equal(missed.confidence, 'high', 'a confirmed long gap is a strong signal');
+});
+
+test('bolus-dependent guesses: a stubborn high with a recently-logged bolus does NOT suggest a missed bolus', () => {
+  const g = generateGuesses(ctx({ currentValue: 260, rate: 0.1, minutesSinceLastBolus: 30, readings: readings([258, 260]) }));
+  assert.ok(!g.some(x => x.label === 'Possible missed or late bolus?'), 'a recent bolus rules this out');
+});
+
+test('bolus-dependent guesses: a low within 120 min of a logged bolus suggests it\'s still working', () => {
+  const g = generateGuesses(ctx({ currentValue: 68, rate: -0.2, severity: 'red', minutesSinceLastBolus: 45, readings: readings([90, 68]) }));
+  assert.ok(g.some(x => x.label === 'Insulin from a recent bolus still working?'), 'recent-bolus guess present');
+});
+
+test('bolus-dependent guesses: a low with no logged bolus never asserts one is "still working"', () => {
+  const g = generateGuesses(ctx({ currentValue: 68, rate: -0.2, severity: 'red', minutesSinceLastBolus: null, readings: readings([90, 68]) }));
+  assert.ok(!g.some(x => x.label === 'Insulin from a recent bolus still working?'), 'never asserted from an absence of data');
 });
 
 test('every guess is phrased as a question', () => {

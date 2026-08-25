@@ -106,7 +106,7 @@ app.get('/api/latest-trend', (req, res) => {
 
 app.post('/api/check-trend', async (req, res) => {
   try {
-    const { readings, tuning } = req.body;
+    const { readings, tuning, lastBolusTimestamp } = req.body;
 
     if (!Array.isArray(readings) || readings.length < 2) {
       return res.status(400).json({ error: 'Missing or insufficient glucose readings (need at least 2)' });
@@ -154,16 +154,23 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
     for (const reading of newReadings) {
       const historyUpToHere = sorted.filter(r => r.date <= reading.date);
       const result = await processNewReading(historyUpToHere, { sendPushNotification, callGeminiForAnalysis, tuning });
-      // Contextual guesses ride along only for actual events (the engine
-      // returns [] otherwise). Bolus history isn't wired yet, so pass null -
-      // the bolus-dependent rules are disabled until that lands.
+      // Computed PER READING, not once from the app's single lastBolusTimestamp
+      // value directly - a batch of new readings can span more than one
+      // bolus-relative window, so "minutes since bolus" has to be relative to
+      // each reading's own timestamp. null (not 0 or a negative number) when
+      // no bolus timestamp was sent, or when the bolus is somehow after this
+      // reading (clock skew / stale client state) - guess-engine.js's
+      // bolus-dependent rules already treat null as "can't reason about this."
+      const minutesSinceLastBolus = typeof lastBolusTimestamp === 'number' && lastBolusTimestamp <= reading.date
+        ? Math.round((reading.date - lastBolusTimestamp) / 60000)
+        : null;
       const guesses = generateGuesses({
         currentValue: result.currentValue,
         rate: result.rate,
         severity: result.severity,
         readings: historyUpToHere,
         timeOfDayHour: new Date(reading.date).getHours(),
-        minutesSinceLastBolus: null,
+        minutesSinceLastBolus,
       });
       results.push({ date: reading.date, ...result, guesses });
     }

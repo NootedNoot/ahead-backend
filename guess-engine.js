@@ -24,7 +24,7 @@ const CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
  *   severity: 'none' | 'yellow' | 'red',
  *   readings: [{ sgv, date }],          // recent, oldest -> newest
  *   timeOfDayHour: number,              // 0-23 local
- *   minutesSinceLastBolus: number|null, // null until bolus logging exists
+ *   minutesSinceLastBolus: number|null, // null if no INSULIN event has ever been logged, or if the logged one is somehow after this reading
  * }
  */
 function generateGuesses(context) {
@@ -49,16 +49,16 @@ function generateGuesses(context) {
       guesses.push({ label: 'Rebound from an earlier low (over-treated)?', confidence: 'medium' });
     }
 
-    /* ===== BOLUS-DEPENDENT HIGH-SIDE GUESSES - DISABLED ==================
-       Turn this block ON once bolus/insulin logging populates
-       context.minutesSinceLastBolus. It stays commented so it can never fire
-       on null data before the feature is ready - to enable, just delete the
-       two comment-marker lines around it.
-
+    // 2026-08-25: enabled now that ahead-android's INSULIN event tag
+    // populates minutesSinceLastBolus (see server.js's per-reading
+    // computation). Still fires on minutesSinceLastBolus == null (no bolus
+    // ever logged) - that's not a missing-data gap, it's itself informative
+    // for a user who hasn't started logging yet, same as before this was
+    // wired up, just now also correctly quiets down once real logging shows
+    // a bolus was recent (see the < 180 exclusion below).
     if (context.minutesSinceLastBolus == null || context.minutesSinceLastBolus > 180) {
-      guesses.push({ label: 'Possible missed or late bolus?', confidence: 'high' });
+      guesses.push({ label: 'Possible missed or late bolus?', confidence: context.minutesSinceLastBolus == null ? 'low' : 'high' });
     }
-    ==================================================================== */
   }
 
   // ---------- LOW-side event ----------
@@ -82,13 +82,14 @@ function generateGuesses(context) {
       });
     }
 
-    /* ===== BOLUS-DEPENDENT LOW-SIDE GUESSES - DISABLED ===================
-       Enable alongside the high-side block above when bolus logging lands.
-
+    // 2026-08-25: enabled alongside the high-side block above. Unlike that
+    // one, this only fires on a CONFIRMED recent bolus (never on null) -
+    // "insulin still working" is an assertion about something that
+    // definitely happened, not a reasonable guess to make from an absence
+    // of data.
     if (context.minutesSinceLastBolus != null && context.minutesSinceLastBolus < 120) {
       guesses.push({ label: 'Insulin from a recent bolus still working?', confidence: 'high' });
     }
-    ==================================================================== */
   }
 
   // Rebound from a treated low: a genuine dip in the recent ~40 min followed by
