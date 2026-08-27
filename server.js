@@ -133,8 +133,12 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
     res.json({ text });
 
   } catch (err) {
+    // Log the real error server-side; never echo err.message to the
+    // client - same policy the global error handler below enforces for
+    // every other route (see its own comment). This route pre-dates that
+    // handler and had drifted from it.
     console.error('Server error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -226,8 +230,11 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
     res.json({ processed: results });
 
   } catch (err) {
+    // Same policy as /analyze above and the global handler below - log the
+    // real error, never echo err.message (could be a raw Postgres error
+    // revealing schema/internal detail) to the client.
     console.error('Server error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

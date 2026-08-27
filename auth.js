@@ -63,7 +63,7 @@ const requireUser = asyncHandler(async function requireUser(req, res, next) {
 
   let payload;
   try {
-    payload = jwt.verify(token, requireEnv('JWT_SECRET'));
+    payload = jwt.verify(token, requireEnv('JWT_SECRET'), { algorithms: ['HS256'] });
   } catch {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
@@ -84,7 +84,7 @@ const requireAdmin = asyncHandler(async function requireAdmin(req, res, next) {
 
   let payload;
   try {
-    payload = jwt.verify(token, requireEnv('ADMIN_JWT_SECRET'));
+    payload = jwt.verify(token, requireEnv('ADMIN_JWT_SECRET'), { algorithms: ['HS256'] });
   } catch {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
