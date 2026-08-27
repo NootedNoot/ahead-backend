@@ -1,11 +1,34 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
+const rateLimit = require('express-rate-limit');
 const { processNewReading } = require('./trend-detector');
 const { generateGuesses } = require('./guess-engine');
+const db = require('./db');
+const { requireDeviceKey, clientIp } = require('./auth');
+
+const authRoutes = require('./routes/auth-routes');
+const devicesRoutes = require('./routes/devices');
+const sharesRoutes = require('./routes/shares');
+const readingsRoutes = require('./routes/readings');
+const adminRoutes = require('./routes/admin');
+
 const app = express();
+
+// Railway sits in front of this as a single reverse-proxy hop - without
+// trust proxy, req.ip would be Railway's own internal address for every
+// request, which would make every auth_events row and every rate-limit
+// bucket collapse onto one fake "IP." Set to 1 (not `true`): `true` trusts
+// the ENTIRE X-Forwarded-For chain, including any value a client sends
+// before it ever reaches Railway - meaning anyone could just claim to be a
+// different IP and dodge rate limiting entirely. `1` trusts exactly the
+// nearest hop (Railway's own edge) and nothing an attacker sends further
+// back in the chain.
+app.set('trust proxy', 1);
 
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -15,6 +38,30 @@ app.use((req, res, next) => {
   req.dryRun = req.body?.dryRun === true || DRY_RUN;
   next();
 });
+
+// Public, self-serve auth endpoints get a real rate limit - every hit that
+// trips it is logged to rate_limit_hits so the admin panel's security view
+// has something to show, not just a silent 429.
+const authLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: async (req, res) => {
+    await db.query(
+      'INSERT INTO rate_limit_hits (ip_address, endpoint) VALUES ($1, $2)',
+      [clientIp(req), req.baseUrl + req.path],
+    ).catch(err => console.error('Failed to log rate-limit hit:', err));
+    res.status(429).json({ error: 'Too many requests, try again in a minute' });
+  },
+});
+
+app.use('/api/auth', authLimiter, authRoutes);
+app.use('/api/admin/login', authLimiter);
+app.use('/api/admin', adminRoutes);
+app.use('/api/devices', devicesRoutes);
+app.use('/api/shares', sharesRoutes);
+app.use('/api/readings', readingsRoutes);
 
 // Raw call to Gemini. Throws on API error; caller decides how to handle it.
 async function callGemini(prompt) {
@@ -91,20 +138,11 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
   }
 });
 
-// In-memory only - resets on restart/redeploy. Fine for a single-user,
-// single-process deployment; if this ever runs multi-instance or needs to
-// survive restarts without a brief catch-up gap, move this to a real store.
-let lastProcessedDate = null;
-let latestTrend = null;
-
-app.get('/api/latest-trend', (req, res) => {
-  if (!latestTrend) {
-    return res.status(404).json({ error: 'No trend data yet' });
-  }
-  res.json(latestTrend);
-});
-
-app.post('/api/check-trend', async (req, res) => {
+// Ingestion + trend analysis, now per-authenticated-device instead of one
+// shared in-memory slot. Request/response shape is unchanged from before
+// this rework - only the auth (X-Ahead-Api-Key, required) and the fact
+// that readings are now actually persisted, per user, are new.
+app.post('/api/check-trend', requireDeviceKey, async (req, res) => {
   try {
     const { readings, tuning, lastBolusTimestamp } = req.body;
 
@@ -113,10 +151,27 @@ app.post('/api/check-trend', async (req, res) => {
     }
 
     const sorted = [...readings].sort((a, b) => a.date - b.date);
+    const userId = req.userId;
 
-    const newReadings = lastProcessedDate === null
-      ? [sorted[sorted.length - 1]]
-      : sorted.filter(r => r.date > lastProcessedDate);
+    // MUST run before the upsert below, or the rows we're about to insert
+    // would be included in their own "old max."
+    const { rows: maxRows } = await db.query(
+      'SELECT MAX(reading_time_ms) AS old_max FROM readings WHERE user_id = $1',
+      [userId],
+    );
+    const oldMax = maxRows[0].old_max === null ? null : Number(maxRows[0].old_max);
+
+    for (const r of sorted) {
+      await db.query(
+        `INSERT INTO readings (user_id, reading_time_ms, sgv) VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, reading_time_ms) DO UPDATE SET sgv = EXCLUDED.sgv`,
+        [userId, r.date, r.sgv],
+      );
+    }
+
+    // Mirrors the old bootstrap behavior: first-ever call for this device
+    // processes only the latest reading, not the whole trailing window.
+    const newReadings = oldMax === null ? [sorted[sorted.length - 1]] : sorted.filter(r => r.date > oldMax);
 
     if (newReadings.length === 0) {
       return res.json({ processed: [] });
@@ -154,13 +209,6 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
     for (const reading of newReadings) {
       const historyUpToHere = sorted.filter(r => r.date <= reading.date);
       const result = await processNewReading(historyUpToHere, { sendPushNotification, callGeminiForAnalysis, tuning });
-      // Computed PER READING, not once from the app's single lastBolusTimestamp
-      // value directly - a batch of new readings can span more than one
-      // bolus-relative window, so "minutes since bolus" has to be relative to
-      // each reading's own timestamp. null (not 0 or a negative number) when
-      // no bolus timestamp was sent, or when the bolus is somehow after this
-      // reading (clock skew / stale client state) - guess-engine.js's
-      // bolus-dependent rules already treat null as "can't reason about this."
       const minutesSinceLastBolus = typeof lastBolusTimestamp === 'number' && lastBolusTimestamp <= reading.date
         ? Math.round((reading.date - lastBolusTimestamp) / 60000)
         : null;
@@ -175,15 +223,23 @@ Keep the whole response under 150 words. Be direct and friendly, not clinical.`;
       results.push({ date: reading.date, ...result, guesses });
     }
 
-    lastProcessedDate = newReadings[newReadings.length - 1].date;
-    latestTrend = results[results.length - 1];
-
     res.json({ processed: results });
 
   } catch (err) {
     console.error('Server error:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Last-resort safety net: asyncHandler routes errors here via next(err)
+// instead of crashing the process. Must be registered after every route.
+// Never echoes err.message for unexpected errors - only the routes that
+// deliberately construct a user-facing message (validation, auth) do that
+// themselves before this is ever reached.
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 app.listen(PORT, () => {

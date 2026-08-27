@@ -1,0 +1,116 @@
+-- Ahead backend schema — multi-tenant accounts, device keys, readings,
+-- family sharing, and the admin/audit/security layer.
+-- Run this once against the Supabase Postgres connection string (Supabase's
+-- SQL editor, or `psql "$DATABASE_URL" -f schema.sql`) before starting the
+-- server with the new code. Safe to re-run: every statement is idempotent.
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;  -- gen_random_uuid()
+CREATE EXTENSION IF NOT EXISTS citext;    -- case-insensitive email
+
+CREATE TABLE IF NOT EXISTS users (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email          CITEXT UNIQUE NOT NULL,
+  password_hash  TEXT NOT NULL,
+  display_name   TEXT,
+  status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  disabled_at    TIMESTAMPTZ,
+  last_login_at  TIMESTAMPTZ,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- status is what makes "disable user" take effect immediately: every
+-- protected request re-checks status='active' against this row (see
+-- auth.js), not just the JWT's own signature/expiry. No blacklist table
+-- needed - disabling flips one column, and the user's very next request
+-- (even with a still-unexpired 30-day token) gets 401'd.
+
+-- Separate from `users` entirely - admins are not self-serve, sign a
+-- DIFFERENT JWT with a DIFFERENT secret (ADMIN_JWT_SECRET) so a regular
+-- user's token can never be replayed against an admin endpoint. No signup
+-- endpoint exists for this table on purpose - seed manually, see
+-- scripts/seed-admin.js.
+CREATE TABLE IF NOT EXISTS admins (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email         CITEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS device_keys (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key_hash      TEXT NOT NULL UNIQUE,   -- HMAC-SHA256(rawKey, DEVICE_KEY_PEPPER), hex
+  key_prefix    TEXT NOT NULL,          -- first 12 raw chars, for UI/log identification only
+  label         TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at  TIMESTAMPTZ,
+  revoked_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_device_keys_user_id ON device_keys(user_id);
+
+-- Every admin action that changes state, with a reason. target_user_id/
+-- target_device_id are nullable so one table covers every action type.
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_id         UUID NOT NULL REFERENCES admins(id),
+  action           TEXT NOT NULL,   -- 'disable_user' | 'enable_user' | 'revoke_device'
+  target_user_id   UUID REFERENCES users(id) ON DELETE SET NULL,
+  target_device_id UUID REFERENCES device_keys(id) ON DELETE SET NULL,
+  reason           TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- ON DELETE SET NULL (not CASCADE) deliberately - if a user is later
+-- deleted entirely, the audit row recording that an admin once disabled
+-- them should still exist for the historical record; it just loses its
+-- now-meaningless target link instead of vanishing with them.
+CREATE INDEX IF NOT EXISTS idx_admin_audit_log_target_user ON admin_audit_log(target_user_id);
+
+-- Every login/signup ATTEMPT, success or failure, both regular users and
+-- admins (is_admin_attempt distinguishes them in one shared table). Powers
+-- the failed-login log, the per-user/per-IP view, and the "flagged"
+-- computation - all query-time against this table, no separate counter to
+-- keep in sync.
+CREATE TABLE IF NOT EXISTS auth_events (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email_attempted  CITEXT NOT NULL,
+  user_id          UUID REFERENCES users(id) ON DELETE SET NULL,
+  is_admin_attempt BOOLEAN NOT NULL DEFAULT false,
+  success          BOOLEAN NOT NULL,
+  ip_address       TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_auth_events_user_id ON auth_events(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_events_ip ON auth_events(ip_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_events_email ON auth_events(email_attempted, created_at DESC);
+
+-- One row per request that got rate-limited (not one row per request
+-- overall), wired via express-rate-limit's custom `handler` callback.
+CREATE TABLE IF NOT EXISTS rate_limit_hits (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ip_address TEXT NOT NULL,
+  endpoint   TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limit_hits_ip ON rate_limit_hits(ip_address, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS readings (
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reading_time_ms BIGINT NOT NULL,   -- epoch ms, exactly what the app sends as `date`
+  sgv             INTEGER NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, reading_time_ms)
+);
+-- Composite PK is the idempotency constraint - ahead-android resends a
+-- trailing 45-min window every ~5 min cycle. Upsert with
+-- ON CONFLICT (user_id, reading_time_ms) DO UPDATE SET sgv = EXCLUDED.sgv.
+-- Same PK also serves "MAX(reading_time_ms) WHERE user_id=$1" and "last N
+-- readings for user X" without a second index.
+
+CREATE TABLE IF NOT EXISTS shares (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  viewer_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, viewer_id),
+  CHECK (owner_id <> viewer_id)
+);
+CREATE INDEX IF NOT EXISTS idx_shares_viewer_id ON shares(viewer_id);

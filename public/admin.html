@@ -1,0 +1,214 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Ahead Admin</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #111; color: #eee; }
+  header { padding: 12px 20px; background: #1a1a1a; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 16px; margin: 0; }
+  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
+  section { margin-bottom: 32px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: #999; border-bottom: 1px solid #333; padding-bottom: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #2a2a2a; }
+  th { color: #888; font-weight: 600; }
+  tr:hover { background: #1a1a1a; }
+  input, button, select { font: inherit; padding: 6px 10px; background: #222; color: #eee; border: 1px solid #444; border-radius: 4px; }
+  button { cursor: pointer; }
+  button:hover { background: #333; }
+  button.danger { border-color: #833; color: #f88; }
+  button.danger:hover { background: #422; }
+  .row { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 11px; }
+  .pill.active { background: #16351f; color: #6fcb8b; }
+  .pill.disabled { background: #3a1f1c; color: #ea8378; }
+  .pill.flag { background: #3a2d13; color: #e0b555; }
+  #loginBox { max-width: 320px; margin: 80px auto; }
+  #loginBox input { width: 100%; margin-bottom: 8px; box-sizing: border-box; }
+  #app { display: none; }
+  .muted { color: #888; font-size: 12px; }
+  a { color: #7ac; }
+</style>
+</head>
+<body>
+
+<div id="loginBox">
+  <h1>Ahead Admin</h1>
+  <input id="adminEmail" placeholder="Admin email" autocomplete="username">
+  <input id="adminPassword" type="password" placeholder="Password" autocomplete="current-password">
+  <button onclick="doLogin()" style="width:100%">Log in</button>
+  <p id="loginError" class="muted"></p>
+</div>
+
+<div id="app">
+<header>
+  <h1>Ahead Admin</h1>
+  <span class="muted" id="whoami"></span>
+</header>
+<main>
+
+<section>
+  <h2>Admins <span class="muted">(requires your password + the invite secret from Railway, every time)</span></h2>
+  <table id="adminsTable"><thead><tr><th>Email</th><th>Since</th></tr></thead><tbody></tbody></table>
+  <details style="margin-top:10px">
+    <summary style="cursor:pointer" class="muted">+ Create a new admin</summary>
+    <div class="row" style="margin-top:10px">
+      <input id="newAdminEmail" placeholder="New admin's email">
+      <input id="newAdminPassword" type="password" placeholder="New admin's password">
+    </div>
+    <div class="row">
+      <input id="actingPassword" type="password" placeholder="YOUR password (confirm it's you)">
+      <input id="inviteSecret" type="password" placeholder="ADMIN_INVITE_SECRET (from Railway)">
+    </div>
+    <div class="row">
+      <input id="adminReason" placeholder="Reason (optional, goes in the audit log)" style="flex:1">
+      <button onclick="createAdmin()">Create admin</button>
+    </div>
+    <p id="createAdminError" class="muted"></p>
+  </details>
+</section>
+
+<section>
+  <h2>Users</h2>
+  <div class="row">
+    <input id="userSearch" placeholder="Search email...">
+    <select id="userStatusFilter"><option value="">Any status</option><option value="active">Active</option><option value="disabled">Disabled</option></select>
+    <button onclick="loadUsers()">Search</button>
+  </div>
+  <table id="usersTable">
+    <thead><tr><th></th><th>Email</th><th>Status</th><th>Devices</th><th>Signed up</th><th>Last login</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Security flags <span class="muted">(&ge;5 failed logins in the last hour)</span></h2>
+  <table id="flagsTable"><thead><tr><th>Type</th><th>Value</th><th>Failed count</th><th>Since</th></tr></thead><tbody></tbody></table>
+</section>
+
+<section>
+  <h2>Recent audit log</h2>
+  <table id="auditTable"><thead><tr><th>When</th><th>Admin</th><th>Action</th><th>Target</th><th>Reason</th></tr></thead><tbody></tbody></table>
+</section>
+
+</main>
+</div>
+
+<script>
+let token = sessionStorage.getItem('adminToken') || '';
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(opts.headers || {}) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+
+async function doLogin() {
+  const email = document.getElementById('adminEmail').value;
+  const password = document.getElementById('adminPassword').value;
+  try {
+    const { token: t, admin } = await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+    token = t;
+    sessionStorage.setItem('adminToken', token);
+    showApp(admin.email);
+  } catch (e) {
+    document.getElementById('loginError').textContent = e.message;
+  }
+}
+
+function showApp(email) {
+  document.getElementById('loginBox').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  document.getElementById('whoami').textContent = email;
+  loadAdmins();
+  loadUsers();
+  loadFlags();
+  loadAuditLog();
+}
+
+async function loadAdmins() {
+  const admins = await api('/api/admin/admins');
+  document.querySelector('#adminsTable tbody').innerHTML = admins.map(a =>
+    `<tr><td>${a.email}</td><td>${new Date(a.createdAt).toLocaleDateString()}</td></tr>`).join('');
+}
+
+async function createAdmin() {
+  const email = document.getElementById('newAdminEmail').value;
+  const password = document.getElementById('newAdminPassword').value;
+  const actingAdminPassword = document.getElementById('actingPassword').value;
+  const inviteSecret = document.getElementById('inviteSecret').value;
+  const reason = document.getElementById('adminReason').value;
+  const errEl = document.getElementById('createAdminError');
+  errEl.textContent = '';
+  try {
+    await api('/api/admin/admins', { method: 'POST', body: JSON.stringify({ email, password, actingAdminPassword, inviteSecret, reason }) });
+    document.getElementById('newAdminEmail').value = '';
+    document.getElementById('newAdminPassword').value = '';
+    document.getElementById('actingPassword').value = '';
+    document.getElementById('inviteSecret').value = '';
+    document.getElementById('adminReason').value = '';
+    loadAdmins(); loadAuditLog();
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+}
+
+async function loadUsers() {
+  const search = document.getElementById('userSearch').value;
+  const status = document.getElementById('userStatusFilter').value;
+  const params = new URLSearchParams({ ...(search ? { search } : {}), ...(status ? { status } : {}) });
+  const { users } = await api('/api/admin/users?' + params);
+  const tbody = document.querySelector('#usersTable tbody');
+  tbody.innerHTML = users.map(u => `
+    <tr>
+      <td><input type="checkbox" class="userCheck" value="${u.id}"></td>
+      <td>${u.email}</td>
+      <td><span class="pill ${u.status}">${u.status}</span></td>
+      <td>${u.deviceCount}</td>
+      <td>${new Date(u.createdAt).toLocaleDateString()}</td>
+      <td>${u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : 'never'}</td>
+      <td>${u.status === 'active'
+        ? `<button class="danger" onclick="disableUser('${u.id}')">Disable</button>`
+        : `<button onclick="enableUser('${u.id}')">Enable</button>`}</td>
+    </tr>`).join('');
+}
+
+async function disableUser(id) {
+  const reason = prompt('Reason for disabling this user?');
+  if (reason === null) return;
+  await api(`/api/admin/users/${id}/disable`, { method: 'POST', body: JSON.stringify({ reason }) });
+  loadUsers(); loadAuditLog();
+}
+
+async function enableUser(id) {
+  const reason = prompt('Reason for re-enabling this user?');
+  if (reason === null) return;
+  await api(`/api/admin/users/${id}/enable`, { method: 'POST', body: JSON.stringify({ reason }) });
+  loadUsers(); loadAuditLog();
+}
+
+async function loadFlags() {
+  const flags = await api('/api/admin/security/flags');
+  document.querySelector('#flagsTable tbody').innerHTML = flags.length
+    ? flags.map(f => `<tr><td><span class="pill flag">${f.type}</span></td><td>${f.value}</td><td>${f.failedCount}</td><td>${new Date(f.windowStart).toLocaleString()}</td></tr>`).join('')
+    : '<tr><td colspan="4" class="muted">No flags right now.</td></tr>';
+}
+
+async function loadAuditLog() {
+  const rows = await api('/api/admin/audit-log?limit=50');
+  document.querySelector('#auditTable tbody').innerHTML = rows.length
+    ? rows.map(r => `<tr><td>${new Date(r.at).toLocaleString()}</td><td>${r.adminEmail}</td><td>${r.action}</td><td>${r.targetUserEmail || '-'}</td><td>${r.reason || ''}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="muted">No admin actions yet.</td></tr>';
+}
+
+if (token) {
+  api('/api/admin/users?page=1').then(() => showApp('(session restored)')).catch(() => { token = ''; sessionStorage.removeItem('adminToken'); });
+}
+</script>
+</body>
+</html>
