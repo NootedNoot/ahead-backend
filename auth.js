@@ -21,8 +21,19 @@ function verifyPassword(password, hash) {
   return bcrypt.compare(password, hash);
 }
 
+// tokenVersion (2026-08-27, password reset) is embedded so requireUser can
+// invalidate every OTHER outstanding session at once by bumping the DB
+// column - the same trick `status` already uses for instant disable, now
+// available for "I just reset my password, kill my old sessions too"
+// without a token blacklist table. Callers MUST pass the user row's
+// current token_version - defaulting it here would silently mint tokens
+// that never actually check anything.
 function signUserToken(user) {
-  return jwt.sign({ sub: user.id, email: user.email }, requireEnv('JWT_SECRET'), { expiresIn: USER_TOKEN_EXPIRY });
+  return jwt.sign(
+    { sub: user.id, email: user.email, tokenVersion: user.token_version },
+    requireEnv('JWT_SECRET'),
+    { expiresIn: USER_TOKEN_EXPIRY },
+  );
 }
 
 function signAdminToken(admin) {
@@ -68,9 +79,19 @@ const requireUser = asyncHandler(async function requireUser(req, res, next) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 
-  const { rows } = await db.query('SELECT id, email, status FROM users WHERE id = $1', [payload.sub]);
+  const { rows } = await db.query('SELECT id, email, status, token_version FROM users WHERE id = $1', [payload.sub]);
   const user = rows[0];
   if (!user || user.status !== 'active') return res.status(401).json({ error: 'Account not found or disabled' });
+  // A password reset bumps token_version - any token signed before that
+  // reset (payload.tokenVersion is now stale) is rejected here even though
+  // its signature and expiry are both still perfectly valid. Tokens signed
+  // before this column existed carry no tokenVersion claim at all
+  // (undefined, not 0 - those are NOT the same value in JS), so this
+  // normalizes a missing claim to 0 to match the column's own default -
+  // otherwise every currently-logged-in session gets force-logged-out the
+  // moment this deploys, not just after a real reset.
+  const tokenVersion = payload.tokenVersion ?? 0;
+  if (tokenVersion !== user.token_version) return res.status(401).json({ error: 'Invalid or expired token' });
 
   req.user = { id: user.id, email: user.email };
   next();
@@ -145,6 +166,23 @@ const requireDeviceKey = asyncHandler(async function requireDeviceKey(req, res, 
   next();
 });
 
+// --- Password-reset / email-verify tokens -----------------------------
+// Same shape as device keys above (256 random bits, base64url, prefixed,
+// hashed at rest) but with its own pepper (EMAIL_TOKEN_PEPPER) - every
+// secret in this app is scoped to exactly one concern, never reused across
+// unrelated credential types, so a leak of one pepper can't be replayed
+// against a different kind of token.
+const EMAIL_TOKEN_PREFIX = 'ahead_et_';
+
+function generateEmailToken() {
+  const raw = EMAIL_TOKEN_PREFIX + crypto.randomBytes(32).toString('base64url');
+  return { raw, hash: hashEmailToken(raw) };
+}
+
+function hashEmailToken(rawToken) {
+  return crypto.createHmac('sha256', requireEnv('EMAIL_TOKEN_PEPPER')).update(rawToken).digest('hex');
+}
+
 // Constant-time comparison against ADMIN_INVITE_SECRET - a value that only
 // ever lives in Railway's env vars, never in code, never sent to anyone
 // except whoever the owner chooses to hand it to directly. This is the
@@ -171,6 +209,8 @@ module.exports = {
   requireAdmin,
   requireDeviceKey,
   generateDeviceKey,
+  generateEmailToken,
+  hashEmailToken,
   logAuthEvent,
   clientIp,
   verifyInviteSecret,

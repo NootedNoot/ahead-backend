@@ -44,9 +44,19 @@ router.post('/', requireUser, asyncHandler(async (req, res) => {
     return res.status(400).json({ error: "You can't share with yourself" });
   }
 
-  const { rows: viewerRows } = await db.query('SELECT id FROM users WHERE email = $1', [viewerEmail.trim()]);
+  // email_verified_at gate (2026-08-27): closes the real gap this was
+  // flagged for - a share grant names a viewer by email string alone, so
+  // without this, anyone could sign up with an email they don't actually
+  // control and get granted access meant for its real owner. Doesn't gate
+  // anything about the VIEWER's own account usage (see users.email_verified_at's
+  // schema.sql comment) - only whether they can be the target of someone
+  // else's share grant.
+  const { rows: viewerRows } = await db.query('SELECT id, email_verified_at FROM users WHERE email = $1', [viewerEmail.trim()]);
   if (viewerRows.length === 0) {
     return res.status(404).json({ error: 'No account found for that email. Ask them to sign up first, then try again.' });
+  }
+  if (!viewerRows[0].email_verified_at) {
+    return res.status(403).json({ error: "That account hasn't verified their email yet - ask them to check their inbox, then try again." });
   }
 
   try {

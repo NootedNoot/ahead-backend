@@ -109,7 +109,7 @@ router.get('/users', asyncHandler(async (req, res) => {
 
 router.get('/users/:id', asyncHandler(async (req, res) => {
   const { rows: userRows } = await db.query(
-    'SELECT id, email, display_name, status, created_at, last_login_at, disabled_at FROM users WHERE id = $1',
+    'SELECT id, email, display_name, status, created_at, last_login_at, disabled_at, email_verified_at FROM users WHERE id = $1',
     [req.params.id],
   );
   if (userRows.length === 0) return res.status(404).json({ error: 'User not found' });
@@ -130,6 +130,7 @@ router.get('/users/:id', asyncHandler(async (req, res) => {
     user: {
       id: u.id, email: u.email, displayName: u.display_name, status: u.status,
       createdAt: u.created_at, lastLoginAt: u.last_login_at, disabledAt: u.disabled_at,
+      emailVerifiedAt: u.email_verified_at,
     },
     devices: devices.map(d => ({
       deviceId: d.id, label: d.label, keyPrefix: d.key_prefix,

@@ -23,6 +23,23 @@ CREATE TABLE IF NOT EXISTS users (
 -- needed - disabling flips one column, and the user's very next request
 -- (even with a still-unexpired 30-day token) gets 401'd.
 
+-- 2026-08-27 (password reset + email verification): email_verified_at is
+-- null until the account clicks a real verification link (see
+-- email_tokens below) - gates nothing about the account's OWN usage
+-- (login/signup/upload all work unverified), only whether OTHER people
+-- can be granted a share naming this account as the viewer (see
+-- routes/shares.js) - the actual gap being closed is "does the email
+-- string on a share grant really belong to whoever's using that account,"
+-- not a general email-verification wall.
+--
+-- token_version is embedded in every JWT issued for this user and
+-- re-checked live on every request exactly like status is. Bumping it
+-- (done on every password reset) invalidates every other outstanding
+-- session token for this account with no blacklist table needed - the
+-- same trick status already uses, generalized.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
+
 -- Separate from `users` entirely - admins are not self-serve, sign a
 -- DIFFERENT JWT with a DIFFERENT secret (ADMIN_JWT_SECRET) so a regular
 -- user's token can never be replayed against an admin endpoint. No signup
@@ -46,6 +63,24 @@ CREATE TABLE IF NOT EXISTS device_keys (
   revoked_at    TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_device_keys_user_id ON device_keys(user_id);
+
+-- One table for both password-reset and email-verify tokens - same
+-- lifecycle either way (generate, email, single-use, expire), no reason to
+-- duplicate it into two tables. Same hashed-at-rest pattern as
+-- device_keys.key_hash above: token_hash = HMAC-SHA256(rawToken,
+-- EMAIL_TOKEN_PEPPER), a separate pepper from DEVICE_KEY_PEPPER on
+-- purpose - every secret in this app is scoped to exactly one concern (see
+-- auth.js's own doc), never shared across unrelated credential types.
+CREATE TABLE IF NOT EXISTS email_tokens (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  purpose     TEXT NOT NULL CHECK (purpose IN ('password_reset', 'email_verify')),
+  token_hash  TEXT NOT NULL UNIQUE,
+  expires_at  TIMESTAMPTZ NOT NULL,
+  used_at     TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_email_tokens_user_id ON email_tokens(user_id, purpose);
 
 -- Every admin action that changes state, with a reason. target_user_id/
 -- target_device_id are nullable so one table covers every action type.
