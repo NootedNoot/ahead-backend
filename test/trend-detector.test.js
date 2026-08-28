@@ -337,21 +337,21 @@ test('mid-range projection with no danger extrapolation is none', () => {
 
 // ---- classifySeverity: rate-based yellow escalation ----
 
-test('144 falling -2.3/min is yellow even though both projections land safe', () => {
+test('166 falling -3.1/min is none when 15m projection lands safe (120)', () => {
   const severity = classifySeverity({
-    currentValue: 144, rate: -2.3, projected: 110, projectedExtended: 75,
+    currentValue: 166, rate: -3.1, projected: 120, projectedExtended: 90,
   });
-  assert.equal(severity, 'yellow');
+  assert.equal(severity, 'none');
 });
 
-test('rate boundary: -1.5 is yellow, -1.4 is none (projection otherwise safe)', () => {
+test('rate boundary: -1.5 is yellow in vulnerable range (<=140), -1.4 is none (projection otherwise safe)', () => {
   const base = { currentValue: 120, projected: 111, projectedExtended: 100 };
   assert.equal(classifySeverity({ ...base, rate: -1.5 }), 'yellow');
   assert.equal(classifySeverity({ ...base, rate: -1.4 }), 'none');
 });
 
-test('rate boundary: 2.5 is yellow, 2.4 is none (projection otherwise safe)', () => {
-  const base = { currentValue: 120, projected: 150, projectedExtended: 180 };
+test('rate boundary: 2.5 is yellow in vulnerable rise range (>=160), 2.4 is none (projection otherwise safe)', () => {
+  const base = { currentValue: 165, projected: 190, projectedExtended: 210 };
   assert.equal(classifySeverity({ ...base, rate: 2.5 }), 'yellow');
   assert.equal(classifySeverity({ ...base, rate: 2.4 }), 'none');
 });
@@ -419,3 +419,26 @@ test('reported bug: rose to 227 then dropped to 220 -> projection points DOWN, n
   assert.ok(result.rate < 0, `expected negative rate, got ${result.rate}`);
   assert.ok(result.projected < 220, `expected projection below current 220, got ${result.projected}`);
 });
+
+test('post-hypo recovery climb inside 40 minutes stays silent under 240 mg/dL', () => {
+  // User was at 75 mg/dL 15m ago, treated with juice, now climbing fast (+3.1 mg/dL/min, currentValue 110, projected 157)
+  const severity = classifySeverity({
+    currentValue: 110,
+    rate: 3.1,
+    projected: 157,
+    projectedExtended: 203,
+    recoveringFromLow: true,
+  });
+  assert.equal(severity, 'none');
+
+  // If rebound crosses 240, alert is allowed (yellow or red depending on projection)
+  const highSeverity = classifySeverity({
+    currentValue: 245,
+    rate: 2.0,
+    projected: 275,
+    projectedExtended: 305,
+    recoveringFromLow: true,
+  });
+  assert.ok(highSeverity === 'yellow' || highSeverity === 'red');
+});
+

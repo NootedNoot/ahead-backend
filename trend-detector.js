@@ -294,7 +294,8 @@ function assessRateTrajectory(rates) {
   const bigSwing = base === 0 ? latest !== 0 : Math.abs(latest - prev) / base > 0.5;
   if (signChange || bigSwing) return { kind: 'noisy', avgDeltaPerStep: 0 };
 
-  const decreasing = rates.every((r, i) => i === 0 || Math.abs(r) < Math.abs(rates[i - 1]));
+  const sameDirection = rates.every((r) => Math.sign(r) === Math.sign(rates[0]) && r !== 0);
+  const decreasing = sameDirection && rates.every((r, i) => i === 0 || Math.abs(r) < Math.abs(rates[i - 1]));
   if (decreasing) {
     let sum = 0;
     for (let i = 1; i < rates.length; i++) sum += rates[i] - rates[i - 1];
@@ -317,8 +318,8 @@ function projectWithDecay(currentValue, currentRate, avgDeltaPerStep, minutes, s
   while (remaining > 0) {
     const step = Math.min(stepMinutes, remaining);
     value += r * step;
-    if (r > 0) r = Math.max(0, r + avgDeltaPerStep);
-    else if (r < 0) r = Math.min(0, r + avgDeltaPerStep);
+    if (r > 0) r = Math.max(0, Math.min(r, r + avgDeltaPerStep));
+    else if (r < 0) r = Math.min(0, Math.max(r, r + avgDeltaPerStep));
     remaining -= step;
   }
   return Math.round(value);
@@ -371,7 +372,7 @@ function getTrendPhase(recentRate, priorRate) {
  * out) - so a value that's merely high-but-falling toward safe, at an ordinary
  * pace, stays 'none' instead of firing a pointless warning.
  */
-function classifySeverity({ currentValue, rate, projected, projectedExtended, redProjected, allowRed = true, tuning }) {
+function classifySeverity({ currentValue, rate, projected, projectedExtended, redProjected, allowRed = true, recoveringFromLow = false, tuning }) {
   const params = resolveTuning(tuning);
 
   // HARD FLOOR - actual value, not projection. A genuinely low reading is RED
@@ -381,6 +382,16 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, re
   // allowRed gate, so trajectory dampening can never soften an actual severe low.
   // 54 mg/dL is the standard clinical "clinically significant hypoglycemia" cutoff.
   if (currentValue <= SEVERE_LOW_RED_FLOOR) return 'red';
+
+  // POST-HYPO RECOVERY GRACE WINDOW (40 minutes):
+  // When recovering from a treated low (<= 80 mg/dL in past 40m) and climbing,
+  // fast positive rates (+2.5, +3.5) and expected rebound bumps under 240 stay SILENT.
+  if (recoveringFromLow && rate > 0 && currentValue < 240) {
+    if (projected >= params.redProjectedHigh || currentValue >= 240) {
+      return 'yellow';
+    }
+    return 'none';
+  }
 
   // The RED decision uses [redProjected] when supplied (a decay-dampened
   // projection from the trajectory check) and falls back to the flat 15-min
@@ -398,9 +409,11 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, re
     if (projectedRed || worseningInDanger) return 'red';
   }
 
-  // YELLOW: a sufficiently fast rate escalates on its own, regardless of where
-  // the projection lands - see YELLOW_RATE_FALLING/RISING above.
-  if (rate <= YELLOW_RATE_FALLING || rate >= YELLOW_RATE_RISING) return 'yellow';
+  // YELLOW: a sufficiently fast rate escalates when in a vulnerable range or heading toward danger.
+  // Gated so a fast fall from a high (e.g. 180 -> 120) doesn't fire a false alarm when the 15m projection is safe.
+  const fastDrop = rate <= YELLOW_RATE_FALLING && (currentValue <= 140 || projected <= params.yellowProjectedLow);
+  const fastRise = rate >= YELLOW_RATE_RISING && (currentValue >= 160 || projected >= params.yellowProjectedHigh);
+  if (fastDrop || fastRise) return 'yellow';
 
   // YELLOW: currently below the ordinary low line right now (61-70; 60 and
   // under is already RED via the hard floor above), independent of
@@ -443,7 +456,7 @@ function buildNotificationMessage(severity, currentValue, rate, projected, proje
  * Main entry point. Call this after every new reading is stored.
  * readings: full array, sorted oldest -> newest, each { sgv, date }
  */
-async function processNewReading(readings, { sendPushNotification, callGeminiForAnalysis, tuning }) {
+async function processNewReading(readings, { sendPushNotification, tuning }) {
   if (!readings || readings.length < 2) return { severity: 'none' };
 
   const current = readings[readings.length - 1];
@@ -479,9 +492,15 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
     : projected;
   const allowRed = trajectory.kind !== 'noisy';
 
+  const currentTime = current.date ? new Date(current.date).getTime() : Date.now();
+  const recoveringFromLow = readings.some(r => {
+    const t = r.date ? new Date(r.date).getTime() : currentTime;
+    return (currentTime - t <= 40 * 60 * 1000) && (r.sgv <= 80);
+  });
+
   const severity = classifySeverity({
     currentValue: current.sgv, rate: overallRate, projected, projectedExtended,
-    redProjected, allowRed, tuning: params,
+    redProjected, allowRed, recoveringFromLow, tuning: params,
   });
 
   if (severity === 'none') {
@@ -490,17 +509,11 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
 
   const notificationMessage = buildNotificationMessage(severity, current.sgv, overallRate, projected, projectedExtended, params.extendedProjectionMinutes);
 
-  const [pushResult, geminiResult] = await Promise.allSettled([
-    sendPushNotification(notificationMessage),
-    callGeminiForAnalysis({
-      currentValue: current.sgv,
-      rate: overallRate,
-      trendPhase,
-      severity,
-      projected,
-      recentReadings: readings.slice(-6)
-    })
-  ]);
+  // Gemini-backed analysis used to run alongside the push send here
+  // (Promise.allSettled with a second callGeminiForAnalysis call) - removed
+  // 2026-08-27, needs a real rework rather than shipping half-done (see
+  // server.js's /analyze doc comment for the matching removal there).
+  const pushResult = await sendPushNotification(notificationMessage);
 
   return {
     severity,
@@ -517,7 +530,6 @@ async function processNewReading(readings, { sendPushNotification, callGeminiFor
     tuning: params,
     notificationMessage,
     pushResult,
-    geminiResult
   };
 }
 
