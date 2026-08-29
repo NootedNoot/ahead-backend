@@ -109,7 +109,7 @@ router.get('/users', asyncHandler(async (req, res) => {
 
 router.get('/users/:id', asyncHandler(async (req, res) => {
   const { rows: userRows } = await db.query(
-    'SELECT id, email, display_name, status, created_at, last_login_at, disabled_at, email_verified_at, is_owner FROM users WHERE id = $1',
+    'SELECT id, email, display_name, status, created_at, last_login_at, disabled_at, email_verified_at FROM users WHERE id = $1',
     [req.params.id],
   );
   if (userRows.length === 0) return res.status(404).json({ error: 'User not found' });
@@ -131,7 +131,6 @@ router.get('/users/:id', asyncHandler(async (req, res) => {
       id: u.id, email: u.email, displayName: u.display_name, status: u.status,
       createdAt: u.created_at, lastLoginAt: u.last_login_at, disabledAt: u.disabled_at,
       emailVerifiedAt: u.email_verified_at,
-      isOwner: u.is_owner,
     },
     devices: devices.map(d => ({
       deviceId: d.id, label: d.label, keyPrefix: d.key_prefix,
@@ -172,28 +171,6 @@ router.post('/users/:id/enable', asyncHandler(async (req, res) => {
     [req.admin.id, req.params.id, req.body?.reason || null],
   );
   res.json({ enabled: true });
-}));
-
-// is_owner marks a regular user account as Ryan's own, so both Android
-// apps can gate developer tooling (the debug menu) on WHICH account is
-// logged in, not just "is this a debug build" - see schema.sql's own
-// comment on users.is_owner for the full reasoning. Same shape as
-// disable/enable above: admin-only, audit-logged, no self-service path.
-router.post('/users/:id/set-owner', asyncHandler(async (req, res) => {
-  const { isOwner, reason } = req.body || {};
-  if (typeof isOwner !== 'boolean') {
-    return res.status(400).json({ error: 'isOwner (boolean) is required' });
-  }
-  const { rows } = await db.query(
-    `UPDATE users SET is_owner = $1 WHERE id = $2 RETURNING id`,
-    [isOwner, req.params.id],
-  );
-  if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
-  await db.query(
-    `INSERT INTO admin_audit_log (admin_id, action, target_user_id, reason) VALUES ($1, 'set_owner', $2, $3)`,
-    [req.admin.id, req.params.id, reason || (isOwner ? 'granted owner/dev access' : 'revoked owner/dev access')],
-  );
-  res.json({ isOwner });
 }));
 
 router.post('/users/bulk-disable', asyncHandler(async (req, res) => {
