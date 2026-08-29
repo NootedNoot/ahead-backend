@@ -61,6 +61,18 @@ const SEVERE_LOW_RED_FLOOR = 60;
 const YELLOW_RATE_FALLING = -1.5;
 const YELLOW_RATE_RISING = 2.5;
 
+// 2026-08-28: pulled out of inline literals during a fragmentation audit -
+// these four were previously bare numbers (140, 160, 240, 40*60*1000)
+// scattered through classifySeverity/processNewReading with no name, which
+// made it impossible for the shared golden-vectors constants-parity test
+// (ahead-rate-math/golden-vectors/severity-thresholds.json) to check them
+// against SeverityEngine.kt's equivalents. Values unchanged - naming only.
+const VULNERABLE_DROP_CEILING_MGDL = 140;
+const VULNERABLE_RISE_FLOOR_MGDL = 160;
+const RECOVERY_REBOUND_CEILING_MGDL = 240;
+const RECOVERING_FROM_LOW_TRIGGER_MGDL = 80;
+const POST_HYPO_RECOVERY_GRACE_WINDOW_MS = 40 * 60 * 1000;
+
 // Default decay for RED's projection on a fast, still-accelerating RISE (not
 // yet confirmed 'decelerating' by assessRateTrajectory). Without this,
 // projectGlucose holds the rate flat for the whole window, so a genuinely
@@ -383,11 +395,13 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, re
   // 54 mg/dL is the standard clinical "clinically significant hypoglycemia" cutoff.
   if (currentValue <= SEVERE_LOW_RED_FLOOR) return 'red';
 
-  // POST-HYPO RECOVERY GRACE WINDOW (40 minutes):
-  // When recovering from a treated low (<= 80 mg/dL in past 40m) and climbing,
-  // fast positive rates (+2.5, +3.5) and expected rebound bumps under 240 stay SILENT.
-  if (recoveringFromLow && rate > 0 && currentValue < 240) {
-    if (projected >= params.redProjectedHigh || currentValue >= 240) {
+  // POST-HYPO RECOVERY GRACE WINDOW:
+  // When recovering from a treated low (<= RECOVERING_FROM_LOW_TRIGGER_MGDL in
+  // the past POST_HYPO_RECOVERY_GRACE_WINDOW_MS) and climbing, fast positive
+  // rates (+2.5, +3.5) and expected rebound bumps under RECOVERY_REBOUND_CEILING_MGDL
+  // stay SILENT.
+  if (recoveringFromLow && rate > 0 && currentValue < RECOVERY_REBOUND_CEILING_MGDL) {
+    if (projected >= params.redProjectedHigh || currentValue >= RECOVERY_REBOUND_CEILING_MGDL) {
       return 'yellow';
     }
     return 'none';
@@ -411,8 +425,8 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, re
 
   // YELLOW: a sufficiently fast rate escalates when in a vulnerable range or heading toward danger.
   // Gated so a fast fall from a high (e.g. 180 -> 120) doesn't fire a false alarm when the 15m projection is safe.
-  const fastDrop = rate <= YELLOW_RATE_FALLING && (currentValue <= 140 || projected <= params.yellowProjectedLow);
-  const fastRise = rate >= YELLOW_RATE_RISING && (currentValue >= 160 || projected >= params.yellowProjectedHigh);
+  const fastDrop = rate <= YELLOW_RATE_FALLING && (currentValue <= VULNERABLE_DROP_CEILING_MGDL || projected <= params.yellowProjectedLow);
+  const fastRise = rate >= YELLOW_RATE_RISING && (currentValue >= VULNERABLE_RISE_FLOOR_MGDL || projected >= params.yellowProjectedHigh);
   if (fastDrop || fastRise) return 'yellow';
 
   // YELLOW: currently below the ordinary low line right now (61-70; 60 and
@@ -495,7 +509,7 @@ async function processNewReading(readings, { sendPushNotification, tuning }) {
   const currentTime = current.date ? new Date(current.date).getTime() : Date.now();
   const recoveringFromLow = readings.some(r => {
     const t = r.date ? new Date(r.date).getTime() : currentTime;
-    return (currentTime - t <= 40 * 60 * 1000) && (r.sgv <= 80);
+    return (currentTime - t <= POST_HYPO_RECOVERY_GRACE_WINDOW_MS) && (r.sgv <= RECOVERING_FROM_LOW_TRIGGER_MGDL);
   });
 
   const severity = classifySeverity({
@@ -556,7 +570,12 @@ module.exports = {
   YELLOW_RATE_FALLING,
   YELLOW_RATE_RISING,
   RED_PROJECTED_HIGH,
-  SEVERE_LOW_RED_FLOOR
+  SEVERE_LOW_RED_FLOOR,
+  VULNERABLE_DROP_CEILING_MGDL,
+  VULNERABLE_RISE_FLOOR_MGDL,
+  RECOVERY_REBOUND_CEILING_MGDL,
+  RECOVERING_FROM_LOW_TRIGGER_MGDL,
+  POST_HYPO_RECOVERY_GRACE_WINDOW_MS
   ,DEFAULT_TUNING
   ,resolveTuning
 };
