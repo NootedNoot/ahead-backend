@@ -40,6 +40,20 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
 
+-- 2026-08-29: is_owner marks a REGULAR user account (not an admin - see
+-- the separate `admins` table below) as belonging to Ryan himself, so both
+-- Android apps can gate developer-only tooling (the debug menu) on WHICH
+-- ACCOUNT is logged in, not just "is this a debug build." A debug build's
+-- only real distribution control today is Ryan handing out the APK
+-- himself, but the moment a real family member logs into that same debug
+-- build with their own caregiver account, BuildConfig.DEBUG alone would
+-- have shown them developer tooling meant only for Ryan. Deliberately NOT
+-- self-service and NOT settable via any user-facing endpoint - only
+-- flippable through the admin panel (see routes/admin.js's
+-- POST /users/:id/set-owner), same "no admin action without an audit
+-- trail" discipline every other privilege change in this schema follows.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT false;
+
 -- Separate from `users` entirely - admins are not self-serve, sign a
 -- DIFFERENT JWT with a DIFFERENT secret (ADMIN_JWT_SECRET) so a regular
 -- user's token can never be replayed against an admin endpoint. No signup

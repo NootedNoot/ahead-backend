@@ -73,13 +73,16 @@ router.post('/signup', asyncHandler(async (req, res) => {
   const { rows } = await db.query(
     `INSERT INTO users (email, password_hash, display_name, last_login_at)
      VALUES ($1, $2, $3, now())
-     RETURNING id, email, display_name, token_version`,
+     RETURNING id, email, display_name, token_version, is_owner`,
     [email, passwordHash, displayName || null],
   );
   const user = rows[0];
 
   await logAuthEvent({ email, userId: user.id, success: true, ip: clientIp(req) });
-  res.status(201).json({ token: signUserToken(user), user: { id: user.id, email: user.email, displayName: user.display_name } });
+  res.status(201).json({
+    token: signUserToken(user),
+    user: { id: user.id, email: user.email, displayName: user.display_name, isOwner: user.is_owner },
+  });
 
   // Fire-and-forget, deliberately AFTER the response is already sent -
   // signup must return a usable token immediately regardless of whether
@@ -100,7 +103,7 @@ router.post('/login', asyncHandler(async (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
 
-  const { rows } = await db.query('SELECT id, email, password_hash, display_name, status, token_version FROM users WHERE email = $1', [email]);
+  const { rows } = await db.query('SELECT id, email, password_hash, display_name, status, token_version, is_owner FROM users WHERE email = $1', [email]);
   const user = rows[0];
 
   // Same 401/message whether the account doesn't exist, the password is
@@ -116,7 +119,10 @@ router.post('/login', asyncHandler(async (req, res) => {
 
   await db.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
   await logAuthEvent({ email, userId: user.id, success: true, ip });
-  res.json({ token: signUserToken(user), user: { id: user.id, email: user.email, displayName: user.display_name } });
+  res.json({
+    token: signUserToken(user),
+    user: { id: user.id, email: user.email, displayName: user.display_name, isOwner: user.is_owner },
+  });
 }));
 
 router.delete('/account', requireUser, asyncHandler(async (req, res) => {
