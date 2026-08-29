@@ -26,6 +26,7 @@ const {
   VULNERABLE_DROP_CEILING_MGDL,
   VULNERABLE_RISE_FLOOR_MGDL,
   RECOVERY_REBOUND_CEILING_MGDL,
+  RECOVERING_FROM_LOW_TRIGGER_MGDL,
   POST_HYPO_RECOVERY_GRACE_WINDOW_MS,
 } = require('../trend-detector.js');
 
@@ -50,5 +51,6 @@ test('severity thresholds match the shared golden values', () => {
   assert.equal(VULNERABLE_DROP_CEILING_MGDL, thresholds.vulnerableDropCeilingMgdl);
   assert.equal(VULNERABLE_RISE_FLOOR_MGDL, thresholds.vulnerableRiseFloorMgdl);
   assert.equal(RECOVERY_REBOUND_CEILING_MGDL, thresholds.recoveryReboundCeilingMgdl);
+  assert.equal(RECOVERING_FROM_LOW_TRIGGER_MGDL, thresholds.recoveringFromLowTriggerMgdl);
   assert.equal(POST_HYPO_RECOVERY_GRACE_WINDOW_MS, thresholds.postHypoRecoveryGraceWindowMinutes * 60_000);
 });
