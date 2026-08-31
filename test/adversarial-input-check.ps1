@@ -137,7 +137,7 @@ Invoke-RestMethod -Method DELETE -Uri "$Base/api/auth/account" -Headers $userAut
 Write-Host "  test account deleted"
 
 Write-Host "`n=== SUMMARY ==="
-$failed = $results | Where-Object { -not $_.Pass }
+$failed = @($results | Where-Object { -not $_.Pass })
 Write-Host "$($results.Count) cases run, $($failed.Count) failed"
 if ($results.Count -eq 0) {
     # A real failure mode this script had once already (2026-08-30): a
