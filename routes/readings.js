@@ -5,11 +5,24 @@ const asyncHandler = require('../lib/asyncHandler');
 
 const router = express.Router();
 
+// Lenient about version/variant bits on purpose - this only needs to catch
+// obviously-malformed input before it reaches a UUID-typed column, not
+// assert RFC 4122 strictness.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // The companion-app read path. ownerId defaults to the caller's own id;
 // reading anyone else's requires an active `shares` row granting it - the
 // core authorization check for the whole sharing model.
 router.get('/', requireUser, asyncHandler(async (req, res) => {
   const ownerId = req.query.ownerId || req.user.id;
+  // Found live 2026-08-31 via adversarial testing: a garbage non-UUID
+  // ownerId (e.g. "not-a-real-uuid-at-all") previously reached the `shares`/
+  // `readings` queries directly and hit an unhandled Postgres
+  // invalid-input-syntax-for-type-uuid error - a client typo shouldn't ever
+  // 500 the server.
+  if (!UUID_PATTERN.test(ownerId)) {
+    return res.status(400).json({ error: 'ownerId must be a valid UUID' });
+  }
   const count = Math.min(parseInt(req.query.count, 10) || 100, 500);
 
   if (ownerId !== req.user.id) {

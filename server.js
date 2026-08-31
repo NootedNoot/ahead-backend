@@ -28,6 +28,28 @@ app.set('trust proxy', 1);
 
 app.use(cors());
 app.use(express.json());
+
+// Malformed request bodies (unparseable JSON, or a body over express.json's
+// default 100kb limit) previously fell through to the generic 500 handler
+// at the bottom of this file - a client mistake (a typo'd Content-Type, a
+// genuinely broken JSON payload, or a large-enough backfill batch) got
+// treated as OUR fault instead of theirs. Found 2026-08-31 via deliberate
+// adversarial testing (see ahead-backend/test/adversarial-input-check.ps1) -
+// none of these leaked err.message (the global handler already guarded
+// that), but the status code was wrong on every one of them. Must sit
+// directly after express.json(), since that's the middleware whose parse
+// errors this is catching - Express walks forward to the next
+// error-handling (4-arg) middleware in the stack, not to any specific one.
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    return res.status(400).json({ error: 'Malformed JSON in request body' });
+  }
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request body too large' });
+  }
+  next(err);
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
@@ -89,6 +111,22 @@ app.post('/api/check-trend', requireDeviceKey, async (req, res) => {
 
     if (!Array.isArray(readings) || readings.length < 2) {
       return res.status(400).json({ error: 'Missing or insufficient glucose readings (need at least 2)' });
+    }
+
+    // sgv is an INTEGER column - a non-numeric value (found live 2026-08-31
+    // via adversarial testing: a string like "one-hundred") previously hit
+    // an unhandled Postgres type-cast error on insert and 500'd instead of
+    // being rejected up front. 20-600 is deliberately generous, not a
+    // clinical bound - real CGMs report roughly 40-400, this just catches
+    // clearly-garbage values (negative, or a typo'd extra digit) without
+    // asserting authority on what's clinically plausible.
+    for (const r of readings) {
+      if (typeof r.date !== 'number' || !Number.isFinite(r.date) || r.date <= 0) {
+        return res.status(400).json({ error: 'Each reading needs a valid numeric date (epoch ms)' });
+      }
+      if (typeof r.sgv !== 'number' || !Number.isFinite(r.sgv) || r.sgv < 20 || r.sgv > 600) {
+        return res.status(400).json({ error: 'Each reading needs a numeric sgv in a plausible range (20-600)' });
+      }
     }
 
     const sorted = [...readings].sort((a, b) => a.date - b.date);
