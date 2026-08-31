@@ -62,17 +62,32 @@ Write-Host "    (simulates a cold-start retry storm - should NOT trip the rate l
 $burstResults = @()
 for ($i = 0; $i -lt 6; $i++) {
     try {
-        $r = Invoke-WebRequest -Method GET -Uri "$Base/" -TimeoutSec 10 -SkipHttpErrorCheck
+        # -SkipHttpErrorCheck isn't a Windows PowerShell 5.1 flag (this
+        # environment) - an earlier version of this script used it, which
+        # threw a parameter-binding error on every call before any request
+        # was sent, landed every result as -1, and still printed PASS since
+        # -1 isn't 429 either. Same bug class already found and fixed once
+        # in adversarial-input-check.ps1; fixed here the same way.
+        # -UseBasicParsing: see adversarial-input-check.ps1's comment on the
+        # same flag - without it, Windows PowerShell 5.1's Invoke-WebRequest
+        # throws a "NonInteractive mode" error trying to init IE's DOM
+        # engine, not a real network failure. This is what produced this
+        # test's "all 6 transport failures" result before being fixed.
+        $r = Invoke-WebRequest -Method GET -Uri "$Base/" -TimeoutSec 10 -UseBasicParsing
         $burstResults += [int]$r.StatusCode
     } catch {
-        $burstResults += -1
+        $resp = $_.Exception.Response
+        $burstResults += if ($resp) { [int]$resp.StatusCode } else { -1 }
     }
 }
 Write-Host "    statuses: $($burstResults -join ', ')"
-if (($burstResults | Where-Object { $_ -eq 429 }).Count -gt 0) {
+$realResponses = @($burstResults | Where-Object { $_ -gt 0 })
+if ($realResponses.Count -eq 0) {
+    Write-Host "  FAIL: zero real HTTP responses came back (all transport failures) - this is a script/network problem, not a real pass. Do not trust this result."
+} elseif (($burstResults | Where-Object { $_ -eq 429 }).Count -gt 0) {
     Write-Host "  NOTE: hit a 429 during ordinary burst traffic on a non-auth route - worth checking rate limiter scope."
 } else {
-    Write-Host "  PASS: no rate-limit rejection on ordinary burst traffic."
+    Write-Host "  PASS: no rate-limit rejection on ordinary burst traffic ($($realResponses.Count)/6 real responses received)."
 }
 
 Write-Host "`n=== Cleanup ==="
