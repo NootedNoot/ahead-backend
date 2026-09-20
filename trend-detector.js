@@ -141,6 +141,29 @@ function resolveTuning(input) {
 // different consecutive samples.
 const DUPLICATE_MERGE_WINDOW_SECONDS = 90;
 
+// 2026-09-20: the merge used to require the two values to be EXACTLY equal, which missed the
+// likeliest real shape of a double write - two writers rounding the same mmol/L sample to mg/dL
+// and landing one apart. Two points 2 seconds apart differing by 1 then survived as "real
+// consecutive samples" and the slope divided by that 2-second gap: measured 15 mg/dL/min here
+// (30 on the Kotlin side, which is unsmoothed) out of nothing. A real CGM cannot move 2 mg/dL
+// meaningfully inside 90 seconds, so this still only ever merges duplicate writes.
+// Mirrors ahead-rate-math RateMath.DUPLICATE_MERGE_VALUE_TOLERANCE_MGDL.
+const DUPLICATE_MERGE_VALUE_TOLERANCE_MGDL = 2;
+
+// Longest gap that can still yield a trustworthy rate. Mirrors RateMath.MAX_RATE_INTERVAL_MINUTES.
+// Before this, the first reading after a blackout was divided by the whole blackout - a real fall
+// from 124 to 72 across two hours reported as -0.43 mg/dL/min. 20 minutes tolerates ordinary
+// 5-minute-cadence jitter (up to three missed samples) without inventing a rate across an outage.
+const MAX_RATE_INTERVAL_MINUTES = 20;
+
+// How much steeper the newest interval may be than its predecessor and still count as a real
+// acceleration rather than a single-sample glitch. Mirrors RateMath.MAX_ESCALATION_RATIO.
+const MAX_ESCALATION_RATIO = 3.0;
+
+// Projections are clamped into this range - see projectGlucose.
+const MIN_PLAUSIBLE_MGDL = 0;
+const MAX_PLAUSIBLE_MGDL = 600;
+
 /**
  * Collapses consecutive readings that look like the same underlying CGM
  * sample written by more than one source - see
@@ -154,7 +177,9 @@ function collapseDuplicateReadings(readings, mergeWindowSeconds = DUPLICATE_MERG
   const result = [];
   for (const reading of readings) {
     const last = result[result.length - 1];
-    const isDuplicate = last && last.sgv === reading.sgv && Math.abs(reading.date - last.date) <= mergeWindowMs;
+    const isDuplicate = last &&
+      Math.abs(last.sgv - reading.sgv) <= DUPLICATE_MERGE_VALUE_TOLERANCE_MGDL &&
+      Math.abs(reading.date - last.date) <= mergeWindowMs;
     if (isDuplicate) {
       result[result.length - 1] = reading;
     } else {
@@ -188,6 +213,9 @@ function rateInWindow(readings, windowEndTime, windowMinutes) {
 function pointToPointRate(from, to) {
   const minutes = (to.date - from.date) / 60000;
   if (minutes <= 0) return null;
+  // A gap this long means we do not know what happened in between - see
+  // MAX_RATE_INTERVAL_MINUTES. "Unknown" is safer than a diluted number that looks precise.
+  if (minutes > MAX_RATE_INTERVAL_MINUTES) return null;
   return (to.sgv - from.sgv) / minutes;
 }
 
@@ -240,8 +268,19 @@ function calculateRate(readings, smoothingIntervals = DEFAULT_TUNING.smoothingIn
   return (recentRate + priorRate) / 2;
 }
 
+/**
+ * Clamps a projection into the physiologically possible range. 2026-09-20: straight-line
+ * extrapolation of a steep rate used to print impossible numbers - a 30-min projection of
+ * -29 mg/dL - which reached the notification text. Clamping changes no severity decision
+ * (every threshold sits inside this range), it only stops the app saying something impossible.
+ * Mirrors ahead-rate-math RateMath.clampProjection.
+ */
+function clampProjection(value) {
+  return Math.min(MAX_PLAUSIBLE_MGDL, Math.max(MIN_PLAUSIBLE_MGDL, value));
+}
+
 function projectGlucose(currentValue, rate, minutesAhead = PROJECTION_MINUTES) {
-  return Math.round(currentValue + rate * minutesAhead);
+  return clampProjection(Math.round(currentValue + rate * minutesAhead));
 }
 
 // ---- RED-projection confirmation ----
@@ -304,7 +343,21 @@ function assessRateTrajectory(rates) {
   const signChange = Math.sign(prev) !== 0 && Math.sign(latest) !== 0 && Math.sign(prev) !== Math.sign(latest);
   const base = Math.abs(prev);
   const bigSwing = base === 0 ? latest !== 0 : Math.abs(latest - prev) / base > 0.5;
-  if (signChange || bigSwing) return { kind: 'noisy', avgDeltaPerStep: 0 };
+
+  // 2026-09-20: a CONFIRMED, PROPORTIONATE ACCELERATION is not noise - it is what the onset of a
+  // real crash looks like, and it was the one shape that could never fire RED. Every interval in
+  // the window pointing the same way, each strictly steeper than the last, is three readings
+  // agreeing that this is getting worse; the >50% bigSwing rule fired on exactly that and vetoed
+  // the escalation. Measured before this fix: 85 mg/dL reached via -1.2, -2.4, -3.8 scored YELLOW
+  // while the identical value and rate reached steadily scored RED, both printing a projection
+  // of 28. MAX_ESCALATION_RATIO is what still separates this from a single-sample glitch: a
+  // dropout arrives as a wild outlier against a flat run (-0.2, -0.3, -5.0 is a 16x step), which
+  // stays noisy and still cannot drive RED. Mirrors RateMath.assessRateTrajectory.
+  const monotonicEscalation =
+    rates.every((r) => Math.sign(r) === Math.sign(rates[0]) && r !== 0) &&
+    rates.every((r, i) => i === 0 || Math.abs(r) > Math.abs(rates[i - 1])) &&
+    base > 0 && Math.abs(latest) <= base * MAX_ESCALATION_RATIO;
+  if ((signChange || bigSwing) && !monotonicEscalation) return { kind: 'noisy', avgDeltaPerStep: 0 };
 
   const sameDirection = rates.every((r) => Math.sign(r) === Math.sign(rates[0]) && r !== 0);
   const decreasing = sameDirection && rates.every((r, i) => i === 0 || Math.abs(r) < Math.abs(rates[i - 1]));
@@ -400,7 +453,16 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, re
   // the past POST_HYPO_RECOVERY_GRACE_WINDOW_MS) and climbing, fast positive
   // rates (+2.5, +3.5) and expected rebound bumps under RECOVERY_REBOUND_CEILING_MGDL
   // stay SILENT.
-  if (recoveringFromLow && rate > 0 && currentValue < RECOVERY_REBOUND_CEILING_MGDL) {
+  // 2026-09-20 - THE SILENT LOW. recoveringFromLow is derived in processNewReading as "some
+  // reading <= RECOVERING_FROM_LOW_TRIGGER_MGDL in the last 40 minutes" - and the CURRENT reading
+  // counts toward that. So every reading at or under 80 flagged itself as "recovering", and this
+  // branch then returned 'none' for ANY positive rate. One mg/dL of sensor noise silenced a real
+  // low: verified end-to-end through processNewReading, a run of 78 -> 74 -> 70 -> 66 -> 67 scored
+  // 'none' and sent no push. The grace exists for "treated a low, now climbing back through
+  // normal", which is only true once the value is clear of the low band; while still inside it,
+  // fall through to ordinary tiering. Mirrors SeverityEngine.kt's identical guard.
+  const clearOfLowBand = currentValue > RECOVERING_FROM_LOW_TRIGGER_MGDL;
+  if (recoveringFromLow && clearOfLowBand && rate > 0 && currentValue < RECOVERY_REBOUND_CEILING_MGDL) {
     if (projected >= params.redProjectedHigh || currentValue >= RECOVERY_REBOUND_CEILING_MGDL) {
       return 'yellow';
     }
@@ -415,13 +477,18 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, re
   // RED: the projection crosses a real danger threshold, OR we're already in a
   // danger zone and still moving deeper into it (direction guard - a value
   // already past the threshold but heading back toward safe doesn't count).
-  if (allowRed) {
-    const projectedRed = redProj <= params.redProjectedLow || redProj >= params.redProjectedHigh;
-    const worseningInDanger =
-      (currentValue <= params.redProjectedLow && rate < 0) ||
-      (currentValue >= params.redProjectedHigh && rate > 0);
-    if (projectedRed || worseningInDanger) return 'red';
-  }
+  //
+  // 2026-09-20 note on parity: SeverityEngine.kt splits this gate in two, because on-device it
+  // carries a SECOND suppressor this file has no equivalent of - RateConsensus's rate-agreement
+  // check - and that one must never silence a low. Here [allowRed] is only ever the noisy-
+  // trajectory veto, which is still honoured on both sides, so the split would be a no-op. What
+  // actually fixed the accelerating-crash miss on this side is assessRateTrajectory above no
+  // longer calling a confirmed, proportionate acceleration "noisy" in the first place.
+  const lowSideRed =
+    redProj <= params.redProjectedLow || (currentValue <= params.redProjectedLow && rate < 0);
+  const highSideRed =
+    redProj >= params.redProjectedHigh || (currentValue >= params.redProjectedHigh && rate > 0);
+  if (allowRed && (lowSideRed || highSideRed)) return 'red';
 
   // YELLOW: a sufficiently fast rate escalates when in a vulnerable range or heading toward danger.
   // Gated so a fast fall from a high (e.g. 180 -> 120) doesn't fire a false alarm when the 15m projection is safe.
@@ -452,6 +519,13 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, re
 }
 
 function buildNotificationMessage(severity, currentValue, rate, projected, projectedExtended, extendedMinutes = EXTENDED_PROJECTION_MINUTES) {
+  // rate === null means the slope could not be computed at all (one reading, colliding
+  // timestamps, or - since 2026-09-20 - a gap too long to measure across). Say so rather than
+  // printing a confident "falling 0.0", which is what a null used to render as.
+  if (rate === null || rate === undefined || !Number.isFinite(rate)) {
+    const unknown = `${currentValue} mg/dL, trend unknown (not enough recent readings).`;
+    return severity === 'red' ? `🔴 URGENT: ${unknown} Check now.` : `${unknown} Consider checking in.`;
+  }
   const direction = rate > 0 ? 'rising' : 'falling';
   const sign = rate > 0 ? '+' : '';
   const rateStr = `${sign}${rate.toFixed(1)}`;
@@ -483,10 +557,19 @@ async function processNewReading(readings, { sendPushNotification, tuning }) {
   const trendPhase = getTrendPhase(recentRate, priorRate);
   const consecutiveOutOfRange = countConsecutiveOutOfRange(readings);
 
-  if (overallRate === null) return { severity: 'none', currentValue: current.sgv };
+  // 2026-09-20: an unknown rate used to return 'none' outright, which meant ANY value at all -
+  // 45 mg/dL included - scored silent whenever the slope could not be computed. That was already
+  // reachable (a single deduped reading, colliding timestamps) and the new max-gap rule widens it
+  // to "first reading after a blackout", so it has to be handled rather than short-circuited.
+  // An unknown rate is not evidence of safety: fall through with a flat (rate-0) projection so
+  // the value-based checks - the <=60 hard floor, the <=70 band, the proximity bands - all still
+  // run. `rate: null` is preserved in the result and in the alert text, which says "trend
+  // unknown" rather than inventing a confident 0.0.
+  const rateKnown = overallRate !== null;
+  const effectiveRate = rateKnown ? overallRate : 0;
 
-  const projected = projectGlucose(current.sgv, overallRate);
-  const projectedExtended = projectGlucose(current.sgv, overallRate, params.extendedProjectionMinutes);
+  const projected = projectGlucose(current.sgv, effectiveRate);
+  const projectedExtended = projectGlucose(current.sgv, effectiveRate, params.extendedProjectionMinutes);
 
   // Confirm the RED escalation against the last few rate calcs before trusting
   // the flat projection (see the RED-projection confirmation helpers above).
@@ -496,13 +579,13 @@ async function processNewReading(readings, { sendPushNotification, tuning }) {
   // confirmed decelerating. Falling rates never get default decay - they keep
   // the flat, worst-case projection regardless of speed, since an underestimated
   // low is more dangerous than an underestimated high.
-  const isFastRising = overallRate >= PROJECTION_DECAY_RATE_THRESHOLD;
+  const isFastRising = effectiveRate >= PROJECTION_DECAY_RATE_THRESHOLD;
   const decayPerStep = trajectory.kind === 'decelerating'
     ? trajectory.avgDeltaPerStep
     : (isFastRising ? -DEFAULT_DECAY_PER_STEP : 0);
 
   const redProjected = decayPerStep !== 0
-    ? projectWithDecay(current.sgv, overallRate, decayPerStep, PROJECTION_MINUTES)
+    ? projectWithDecay(current.sgv, effectiveRate, decayPerStep, PROJECTION_MINUTES)
     : projected;
   const allowRed = trajectory.kind !== 'noisy';
 
@@ -513,12 +596,12 @@ async function processNewReading(readings, { sendPushNotification, tuning }) {
   });
 
   const severity = classifySeverity({
-    currentValue: current.sgv, rate: overallRate, projected, projectedExtended,
+    currentValue: current.sgv, rate: effectiveRate, projected, projectedExtended,
     redProjected, allowRed, recoveringFromLow, tuning: params,
   });
 
   if (severity === 'none') {
-    return { severity, rate: overallRate, recentRate, trendPhase, currentValue: current.sgv, projected, projectedExtended, redProjected, rateTrajectory: trajectory.kind, consecutiveOutOfRange, tuning: params };
+    return { severity, rate: overallRate, rateKnown, recentRate, trendPhase, currentValue: current.sgv, projected, projectedExtended, redProjected, rateTrajectory: trajectory.kind, consecutiveOutOfRange, tuning: params };
   }
 
   const notificationMessage = buildNotificationMessage(severity, current.sgv, overallRate, projected, projectedExtended, params.extendedProjectionMinutes);
@@ -531,6 +614,7 @@ async function processNewReading(readings, { sendPushNotification, tuning }) {
 
   return {
     severity,
+    rateKnown,
     fullScreenAlert: severity === 'red', // Android layer checks this to decide push vs. takeover
     rate: overallRate,
     recentRate,
