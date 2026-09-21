@@ -132,6 +132,24 @@ function buildHandlers() {
     return rowsOf([]);
   });
 
+  on(/^UPDATE users SET is_owner = true WHERE id = \$1$/, (db, [id]) => {
+    const u = db.users.find(x => x.id === id);
+    if (u) u.is_owner = true;
+    return rowsOf([]);
+  });
+
+  on(/^SELECT is_owner FROM users WHERE id = \$1$/, (db, [id]) =>
+    rowsOf(db.users.filter(u => u.id === id).map(u => ({ is_owner: u.is_owner }))));
+
+  on(/^SELECT COUNT\(\*\)::int AS count FROM users$/, (db) =>
+    rowsOf([{ count: db.users.length }]));
+
+  on(/^SELECT COUNT\(\*\)::int AS count FROM readings$/, (db) =>
+    rowsOf([{ count: db.readings.length }]));
+
+  on(/^SELECT COUNT\(\*\)::int AS count FROM device_keys WHERE revoked_at IS NULL$/, (db) =>
+    rowsOf([{ count: db.deviceKeys.filter(k => !k.revoked_at).length }]));
+
   on(/^SELECT id, email, display_name, email_verified_at, created_at, last_login_at, is_owner FROM users WHERE id = \$1$/, (db, [id]) =>
     rowsOf(db.users.filter(u => u.id === id).map(u => ({
       id: u.id,

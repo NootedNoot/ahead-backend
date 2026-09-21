@@ -143,3 +143,28 @@ test('Portal API: GET /api/readings/export downloads CSV formatted for doctors',
   assert.ok(res.text.includes('Timestamp (UTC),Local Time,Glucose (mg/dL)'));
   assert.ok(res.text.includes('125'));
 });
+
+test('Portal API: Owner vs Friend permission separation', async () => {
+  const friend = h.fake.addUser({ email: 'friend@aheadt1d.com' });
+  const owner = h.fake.addUser({ email: 'ryan@aheadt1d.com' });
+  owner.is_owner = true;
+
+  // Friend cannot access owner system health (gets 403)
+  const friendRes = await h.http('GET', '/api/auth/system-health', { headers: h.bearer(friend) });
+  assert.equal(friendRes.status, 403);
+
+  // Friend's /me shows isOwner: false
+  const friendMe = await h.http('GET', '/api/auth/me', { headers: h.bearer(friend) });
+  assert.equal(friendMe.json.user.isOwner, false);
+
+  // Owner can access system health (gets 200)
+  const ownerRes = await h.http('GET', '/api/auth/system-health', { headers: h.bearer(owner) });
+  assert.equal(ownerRes.status, 200);
+  assert.equal(ownerRes.json.status, 'healthy');
+  assert.equal(ownerRes.json.database, 'connected');
+  assert.ok(typeof ownerRes.json.counts.totalUsers === 'number');
+
+  // Owner's /me shows isOwner: true
+  const ownerMe = await h.http('GET', '/api/auth/me', { headers: h.bearer(owner) });
+  assert.equal(ownerMe.json.user.isOwner, true);
+});

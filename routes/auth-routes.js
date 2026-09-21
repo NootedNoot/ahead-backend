@@ -114,11 +114,17 @@ router.post('/login', asyncHandler(async (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
 
+  if (!user.is_owner && process.env.OWNER_EMAIL && user.email.toLowerCase() === process.env.OWNER_EMAIL.toLowerCase()) {
+    await db.query('UPDATE users SET is_owner = true WHERE id = $1', [user.id]);
+    user.is_owner = true;
+  }
+  const isOwner = Boolean(user.is_owner || (process.env.OWNER_EMAIL && user.email.toLowerCase() === process.env.OWNER_EMAIL.toLowerCase()));
+
   await db.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
   await logAuthEvent({ email, userId: user.id, success: true, ip });
   res.json({
     token: signUserToken(user),
-    user: { id: user.id, email: user.email, displayName: user.display_name, isOwner: user.is_owner },
+    user: { id: user.id, email: user.email, displayName: user.display_name, isOwner: isOwner },
   });
 }));
 
@@ -217,6 +223,12 @@ router.get('/me', requireUser, asyncHandler(async (req, res) => {
   );
   const user = rows[0];
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!user.is_owner && process.env.OWNER_EMAIL && user.email.toLowerCase() === process.env.OWNER_EMAIL.toLowerCase()) {
+    await db.query('UPDATE users SET is_owner = true WHERE id = $1', [user.id]);
+    user.is_owner = true;
+  }
+  const isOwner = Boolean(user.is_owner || (process.env.OWNER_EMAIL && user.email.toLowerCase() === process.env.OWNER_EMAIL.toLowerCase()));
+
   res.json({
     user: {
       id: user.id,
@@ -225,8 +237,31 @@ router.get('/me', requireUser, asyncHandler(async (req, res) => {
       emailVerified: !!user.email_verified_at,
       createdAt: user.created_at,
       lastLoginAt: user.last_login_at,
-      isOwner: user.is_owner,
+      isOwner: isOwner,
     },
+  });
+}));
+
+router.get('/system-health', requireUser, asyncHandler(async (req, res) => {
+  const { rows } = await db.query('SELECT is_owner FROM users WHERE id = $1', [req.user.id]);
+  const isOwner = Boolean(rows[0]?.is_owner || (process.env.OWNER_EMAIL && req.user.email.toLowerCase() === process.env.OWNER_EMAIL.toLowerCase()));
+  if (!isOwner) return res.status(403).json({ error: 'Owner access required' });
+
+  const { rows: userCountRows } = await db.query('SELECT COUNT(*)::int AS count FROM users');
+  const { rows: readingCountRows } = await db.query('SELECT COUNT(*)::int AS count FROM readings');
+  const { rows: deviceCountRows } = await db.query('SELECT COUNT(*)::int AS count FROM device_keys WHERE revoked_at IS NULL');
+
+  res.json({
+    status: 'healthy',
+    uptimeSeconds: Math.floor(process.uptime()),
+    database: 'connected',
+    counts: {
+      totalUsers: userCountRows[0]?.count || 0,
+      totalReadings: readingCountRows[0]?.count || 0,
+      activeDevices: deviceCountRows[0]?.count || 0,
+    },
+    nodeVersion: process.version,
+    memoryUsageMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
   });
 }));
 
