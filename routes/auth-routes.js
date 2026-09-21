@@ -7,16 +7,13 @@ const {
 const asyncHandler = require('../lib/asyncHandler');
 const { isValidEmail } = require('../lib/validators');
 const { sendPasswordResetEmail, sendVerificationEmail } = require('../lib/email');
+const { verifyEmailLink, resetPasswordLink } = require('../lib/links');
 
 const router = express.Router();
 
-// Railway sets this to the service's own public hostname (no protocol) -
-// falls back to localhost for anyone running this outside Railway. Every
-// emailed link is built from this, never hardcoded, so a custom domain
-// later is a zero-code-change env var swap.
-const PUBLIC_BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
-  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-  : 'http://localhost:3000';
+// Emailed links are built by lib/links.js: SITE_BASE_URL when set (the
+// marketing site), else Railway's own public hostname exactly as before
+// (RAILWAY_PUBLIC_DOMAIN, or localhost outside Railway). Never hardcoded.
 
 const PASSWORD_RESET_EXPIRY_MS = 30 * 60_000;
 const EMAIL_VERIFY_EXPIRY_MS = 24 * 60 * 60_000;
@@ -90,7 +87,7 @@ router.post('/signup', asyncHandler(async (req, res) => {
   // and be done" framing). A send failure here is logged, never surfaced
   // to the client as a signup failure.
   issueEmailToken(user.id, 'email_verify')
-    .then(rawToken => sendVerificationEmail(email, `${PUBLIC_BASE_URL}/verify-email.html?token=${rawToken}`))
+    .then(rawToken => sendVerificationEmail(email, verifyEmailLink(rawToken)))
     .catch(err => console.error('Failed to send verification email:', err));
 }));
 
@@ -155,7 +152,7 @@ router.post('/password-reset/request', asyncHandler(async (req, res) => {
   if (await recentTokenCount(user.id, 'password_reset') >= MAX_PENDING_TOKENS_PER_HOUR) return res.json(responseBody);
 
   const rawToken = await issueEmailToken(user.id, 'password_reset');
-  await sendPasswordResetEmail(email, `${PUBLIC_BASE_URL}/reset-password.html?token=${rawToken}`)
+  await sendPasswordResetEmail(email, resetPasswordLink(rawToken))
     .catch(err => console.error('Failed to send password-reset email:', err));
 
   res.json(responseBody);
@@ -187,7 +184,7 @@ router.post('/verify-email/resend', requireUser, asyncHandler(async (req, res) =
     return res.status(429).json({ error: 'Too many verification emails sent recently - try again later' });
   }
   const rawToken = await issueEmailToken(req.user.id, 'email_verify');
-  await sendVerificationEmail(req.user.email, `${PUBLIC_BASE_URL}/verify-email.html?token=${rawToken}`);
+  await sendVerificationEmail(req.user.email, verifyEmailLink(rawToken));
   res.json({ sent: true });
 }));
 
