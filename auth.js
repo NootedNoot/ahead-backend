@@ -144,6 +144,43 @@ function hashDeviceKey(rawKey) {
   return crypto.createHmac('sha256', requireEnv('DEVICE_KEY_PEPPER')).update(rawKey).digest('hex');
 }
 
+// Uploader lookup. Accepts ONLY role='uploader' rows: a viewer key (read-only,
+// see below) shares this table and this hash scheme, so without the role
+// filter a viewer key's hash would authenticate as a full uploader.
+//
+// Deploy-order safety net: if this code is ever live BEFORE
+// migrations/2026-09-20_viewer_keys.sql has been run, the role column does
+// not exist yet and the role-filtered query would fail (Postgres 42703) - taking
+// every phone's upload down. In that one situation no viewer key can exist
+// either (minting needs the column too), so falling back to the original,
+// role-less query is exactly as safe as before and keeps uploads alive.
+// It logs loudly so the missing migration gets noticed.
+async function findUploaderKey(keyHash) {
+  try {
+    const { rows } = await db.query(
+      `SELECT dk.id, dk.user_id, u.status
+       FROM device_keys dk
+       JOIN users u ON u.id = dk.user_id
+       WHERE dk.key_hash = $1 AND dk.revoked_at IS NULL AND dk.role = 'uploader'`,
+      [keyHash],
+    );
+    return rows[0];
+  } catch (err) {
+    if (err && err.code === '42703' && /\brole\b/.test(err.message || '')) {
+      console.error('device_keys.role column is missing - run migrations/2026-09-20_viewer_keys.sql. Falling back to role-less uploader lookup.');
+      const { rows } = await db.query(
+        `SELECT dk.id, dk.user_id, u.status
+         FROM device_keys dk
+         JOIN users u ON u.id = dk.user_id
+         WHERE dk.key_hash = $1 AND dk.revoked_at IS NULL`,
+        [keyHash],
+      );
+      return rows[0];
+    }
+    throw err;
+  }
+}
+
 // X-Ahead-Api-Key -> req.userId. Also updates last_used_at so the admin
 // panel's device list is meaningful, not just a mint timestamp.
 const requireDeviceKey = asyncHandler(async function requireDeviceKey(req, res, next) {
@@ -151,18 +188,55 @@ const requireDeviceKey = asyncHandler(async function requireDeviceKey(req, res, 
   if (!rawKey) return res.status(401).json({ error: 'Missing X-Ahead-Api-Key header' });
 
   const keyHash = hashDeviceKey(rawKey);
-  const { rows } = await db.query(
-    `SELECT dk.id, dk.user_id, u.status
-     FROM device_keys dk
-     JOIN users u ON u.id = dk.user_id
-     WHERE dk.key_hash = $1 AND dk.revoked_at IS NULL`,
-    [keyHash],
-  );
-  const device = rows[0];
+  const device = await findUploaderKey(keyHash);
   if (!device || device.status !== 'active') return res.status(401).json({ error: 'Unknown, revoked, or disabled device key' });
 
   await db.query('UPDATE device_keys SET last_used_at = now() WHERE id = $1', [device.id]);
   req.userId = device.user_id;
+  next();
+});
+
+// --- Viewer keys (read-only, for the caregiver app) -------------------
+// Same storage, hashing (HMAC-SHA256 + DEVICE_KEY_PEPPER) and key_prefix
+// approach as device keys, in the same table with role='viewer'. Its own raw
+// prefix ("ahead_vk_") makes a leaked key recognisable as read-only.
+//
+// A viewer key is accepted by exactly ONE middleware, requireUserOrViewerKey
+// below, which server routes attach to exactly two GET routes
+// (GET /api/readings, GET /api/shares/accessible). It is refused by
+// requireDeviceKey (role filter above) and is not looked at by requireUser,
+// requireAdmin or anything else, so it cannot upload, delete, mint keys,
+// touch shares/devices/account, or reach admin.
+const VIEWER_KEY_PREFIX = 'ahead_vk_';
+
+function generateViewerKey() {
+  const raw = VIEWER_KEY_PREFIX + crypto.randomBytes(32).toString('base64url');
+  return { raw, hash: hashDeviceKey(raw), prefix: raw.slice(0, 12) };
+}
+
+// X-Ahead-Viewer-Key -> req.user = {id, email} of the key's owner, exactly
+// what requireUser would have set. Authorization AFTER authentication is the
+// route's own and is unchanged (e.g. reading another user's stream still
+// needs a `shares` row). With no X-Ahead-Viewer-Key header this is
+// requireUser verbatim, so the JWT keeps working on these routes. If the
+// header IS present it is the only credential considered: a bad viewer key
+// is a 401, it never falls through to a Bearer token.
+const requireUserOrViewerKey = asyncHandler(async function requireUserOrViewerKey(req, res, next) {
+  const rawKey = req.get('X-Ahead-Viewer-Key');
+  if (!rawKey) return requireUser(req, res, next);
+
+  const { rows } = await db.query(
+    `SELECT dk.id, u.id AS user_id, u.email, u.status
+     FROM device_keys dk
+     JOIN users u ON u.id = dk.user_id
+     WHERE dk.key_hash = $1 AND dk.role = 'viewer' AND dk.revoked_at IS NULL`,
+    [hashDeviceKey(rawKey)],
+  );
+  const viewer = rows[0];
+  if (!viewer || viewer.status !== 'active') return res.status(401).json({ error: 'Unknown, revoked, or disabled viewer key' });
+
+  await db.query('UPDATE device_keys SET last_used_at = now() WHERE id = $1', [viewer.id]);
+  req.user = { id: viewer.user_id, email: viewer.email };
   next();
 });
 
@@ -208,7 +282,9 @@ module.exports = {
   requireUser,
   requireAdmin,
   requireDeviceKey,
+  requireUserOrViewerKey,
   generateDeviceKey,
+  generateViewerKey,
   generateEmailToken,
   hashEmailToken,
   logAuthEvent,

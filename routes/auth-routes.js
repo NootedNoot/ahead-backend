@@ -6,7 +6,7 @@ const {
 } = require('../auth');
 const asyncHandler = require('../lib/asyncHandler');
 const { isValidEmail } = require('../lib/validators');
-const { sendPasswordResetEmail, sendVerificationEmail } = require('../lib/email');
+const { sendPasswordResetEmail, sendVerificationEmail, sendPasswordChangedEmail } = require('../lib/email');
 const { verifyEmailLink, resetPasswordLink } = require('../lib/links');
 
 const router = express.Router();
@@ -170,12 +170,25 @@ router.post('/password-reset/confirm', asyncHandler(async (req, res) => {
   const passwordHash = await hashPassword(newPassword);
   // token_version + 1 in the same statement as the password update - kills
   // every OTHER outstanding session for this account atomically with the
-  // password change itself, not as a separate step that could be skipped
-  // by a crash in between.
-  await db.query(
-    `UPDATE users SET password_hash = $1, token_version = token_version + 1 WHERE id = $2`,
-    [passwordHash, userId],
-  );
+  // password change itself. We also revoke all device keys (uploaders and
+  // viewers) so compromised or stale credentials cannot access or upload data.
+  const userEmail = await db.transaction(async (tx) => {
+    const { rows } = await tx(
+      `UPDATE users SET password_hash = $1, token_version = token_version + 1 WHERE id = $2 RETURNING email`,
+      [passwordHash, userId],
+    );
+    await tx(
+      `UPDATE device_keys SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`,
+      [userId],
+    );
+    return rows[0]?.email;
+  });
+
+  if (userEmail) {
+    sendPasswordChangedEmail(userEmail)
+      .catch(err => console.error('Failed to send password-changed email:', err));
+  }
+
   res.json({ reset: true });
 }));
 

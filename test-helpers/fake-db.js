@@ -132,6 +132,16 @@ function buildHandlers() {
     return rowsOf([]);
   });
 
+  on(/^UPDATE users SET password_hash = \$1, token_version = token_version \+ 1 WHERE id = \$2(?: RETURNING email)?$/, (db, [hash, id]) => {
+    const u = db.users.find(x => x.id === id);
+    if (u) {
+      u.password_hash = hash;
+      u.token_version = (u.token_version || 0) + 1;
+      return rowsOf([{ email: u.email }]);
+    }
+    return rowsOf([]);
+  });
+
   // ---- email_tokens ----
   on(/^INSERT INTO email_tokens \(user_id, purpose, token_hash, expires_at\) VALUES \(\$1, \$2, \$3, \$4\)$/, (db, [userId, purpose, hash, expiresAt]) => {
     db.emailTokens.push({ user_id: userId, purpose, token_hash: hash, expires_at: expiresAt, used_at: null, created_at: new Date() });
@@ -171,6 +181,44 @@ function buildHandlers() {
   on(/^UPDATE device_keys SET last_used_at = now\(\) WHERE id = \$1$/, (db, [id]) => {
     const k = db.deviceKeys.find(x => x.id === id);
     if (k) k.last_used_at = new Date();
+    return rowsOf([]);
+  });
+
+  // Viewer-key mint: cap check + insert in one statement (0 rows = cap hit).
+  on(/^INSERT INTO device_keys \(user_id, key_hash, key_prefix, label, role\) SELECT \$1::uuid, \$2::text, \$3::text, \$4::text, 'viewer' WHERE \(SELECT COUNT\(\*\) FROM device_keys WHERE user_id = \$1::uuid AND role = 'viewer' AND revoked_at IS NULL\) < \$5::int RETURNING id$/, (db, [userId, hash, prefix, label, cap]) => {
+    const active = db.deviceKeys.filter(k => k.user_id === userId && k.role === 'viewer' && !k.revoked_at).length;
+    if (!(active < cap)) return rowsOf([]);
+    const row = db.addDeviceKeyRow({ userId, hash, prefix, label, role: 'viewer' });
+    return rowsOf([{ id: row.id }]);
+  });
+
+  on(/^SELECT id, label, key_prefix, created_at, last_used_at, revoked_at FROM device_keys WHERE user_id = \$1 AND role = 'viewer' ORDER BY created_at DESC$/, (db, [userId]) =>
+    rowsOf(db.deviceKeys.filter(k => k.user_id === userId && k.role === 'viewer')
+      .sort((a, b) => b.created_at - a.created_at)
+      .map(k => ({ id: k.id, label: k.label, key_prefix: k.key_prefix, created_at: k.created_at, last_used_at: k.last_used_at, revoked_at: k.revoked_at }))));
+
+  on(/^UPDATE device_keys SET revoked_at = now\(\) WHERE id = \$1 AND user_id = \$2 AND role = 'viewer' AND revoked_at IS NULL RETURNING id$/, (db, [id, userId]) => {
+    const k = db.deviceKeys.find(x => x.id === id && x.user_id === userId && x.role === 'viewer' && !x.revoked_at);
+    if (!k) return rowsOf([]);
+    k.revoked_at = new Date();
+    return rowsOf([{ id: k.id }]);
+  });
+
+  on(/^UPDATE device_keys SET revoked_at = now\(\) WHERE user_id = \$1 AND revoked_at IS NULL$/, (db, [userId]) => {
+    const activeKeys = db.deviceKeys.filter(k => k.user_id === userId && !k.revoked_at);
+    activeKeys.forEach(k => { k.revoked_at = new Date(); });
+    return rowsOf([]);
+  });
+
+  // ---- upload path (POST /api/check-trend) ----
+  on(/^SELECT MAX\(reading_time_ms\) AS old_max FROM readings WHERE user_id = \$1$/, (db, [userId]) => {
+    const times = db.readings.filter(r => r.user_id === userId).map(r => r.reading_time_ms);
+    return rowsOf([{ old_max: times.length ? String(Math.max(...times)) : null }]);
+  });
+
+  on(/^INSERT INTO readings \(user_id, reading_time_ms, sgv\) VALUES \(\$1, \$2, \$3\) ON CONFLICT \(user_id, reading_time_ms\) DO UPDATE SET sgv = EXCLUDED\.sgv$/, (db, [userId, time, sgv]) => {
+    const existing = db.readings.find(r => r.user_id === userId && r.reading_time_ms === time);
+    if (existing) existing.sgv = sgv; else db.addReading(userId, time, sgv);
     return rowsOf([]);
   });
 

@@ -1,6 +1,6 @@
 const express = require('express');
 const db = require('../db');
-const { requireUser, requireDeviceKey } = require('../auth');
+const { requireUser, requireDeviceKey, requireUserOrViewerKey } = require('../auth');
 const asyncHandler = require('../lib/asyncHandler');
 
 const router = express.Router();
@@ -20,7 +20,11 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 // The companion-app read path. ownerId defaults to the caller's own id;
 // reading anyone else's requires an active `shares` row granting it - the
 // core authorization check for the whole sharing model.
-router.get('/', requireUser, asyncHandler(async (req, res) => {
+// requireUserOrViewerKey: JWT as always, or a read-only viewer key
+// (X-Ahead-Viewer-Key) so the caregiver app's background reads outlive its
+// 30-day login. This is one of only TWO routes a viewer key works on; the
+// authorization above is identical either way.
+router.get('/', requireUserOrViewerKey, asyncHandler(async (req, res) => {
   const ownerId = req.query.ownerId || req.user.id;
   // Found live 2026-08-31 via adversarial testing: a garbage non-UUID
   // ownerId (e.g. "not-a-real-uuid-at-all") previously reached the `shares`/

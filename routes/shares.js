@@ -1,14 +1,15 @@
 const express = require('express');
 const db = require('../db');
-const { requireUser } = require('../auth');
+const { requireUser, requireUserOrViewerKey } = require('../auth');
 const asyncHandler = require('../lib/asyncHandler');
 
 const router = express.Router();
 
 // Everything the logged-in user can VIEW: their own stream first, then
 // anyone who's shared with them. Drives ahead-lite-android's stream picker
-// (auto-select if this array has exactly one entry).
-router.get('/accessible', requireUser, asyncHandler(async (req, res) => {
+// (auto-select if this array has exactly one entry). Also accepts a
+// read-only viewer key (X-Ahead-Viewer-Key) - one of only two routes that do.
+router.get('/accessible', requireUserOrViewerKey, asyncHandler(async (req, res) => {
   const { rows: shared } = await db.query(
     `SELECT u.id AS owner_id, u.email AS owner_email
      FROM shares s JOIN users u ON u.id = s.owner_id

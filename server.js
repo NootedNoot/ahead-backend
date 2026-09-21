@@ -9,6 +9,7 @@ const { requireDeviceKey, clientIp } = require('./auth');
 
 const authRoutes = require('./routes/auth-routes');
 const devicesRoutes = require('./routes/devices');
+const viewerKeysRoutes = require('./routes/viewer-keys');
 const sharesRoutes = require('./routes/shares');
 const readingsRoutes = require('./routes/readings');
 const adminRoutes = require('./routes/admin');
@@ -75,6 +76,7 @@ app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/admin/login', authLimiter);
 app.use('/api/admin', adminRoutes);
 app.use('/api/devices', devicesRoutes);
+app.use('/api/viewer-keys', viewerKeysRoutes);
 app.use('/api/shares', sharesRoutes);
 app.use('/api/readings', readingsRoutes);
 
