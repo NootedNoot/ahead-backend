@@ -170,6 +170,73 @@ function buildHandlers() {
       is_owner: u.is_owner,
     }))));
 
+  on(/^SELECT id, email, is_owner FROM users WHERE id = \$1$/, (db, [id]) =>
+    rowsOf(db.users.filter(u => u.id === id).map(u => ({
+      id: u.id,
+      email: u.email,
+      is_owner: u.is_owner,
+    }))));
+
+  on(/^SELECT id, email, display_name, status, is_owner, email_verified_at, created_at, last_login_at FROM users WHERE id = \$1$/, (db, [id]) =>
+    rowsOf(db.users.filter(u => u.id === id).map(u => ({
+      id: u.id,
+      email: u.email,
+      display_name: u.display_name,
+      status: u.status,
+      is_owner: u.is_owner,
+      email_verified_at: u.email_verified_at,
+      created_at: u.created_at || new Date(),
+      last_login_at: u.last_login_at || new Date(),
+    }))));
+
+  on(/^SELECT u\.id, u\.email, u\.display_name, u\.status, u\.is_owner, u\.email_verified_at, u\.created_at, u\.last_login_at, \(SELECT COUNT\(\*\)::int FROM device_keys dk WHERE dk\.user_id = u\.id AND dk\.revoked_at IS NULL\) AS active_devices, \(SELECT COUNT\(\*\)::int FROM shares s WHERE s\.owner_id = u\.id OR s\.viewer_id = u\.id\) AS share_count FROM users u(?: WHERE \(u\.email ILIKE \$1 OR u\.display_name ILIKE \$1\))? ORDER BY u\.created_at ASC$/, (db, params, sql) => {
+    let list = db.users;
+    if (sql.includes('WHERE (u.email ILIKE')) {
+      const q = String(params[0] || '').replace(/%/g, '').toLowerCase();
+      list = list.filter(u => u.email.toLowerCase().includes(q) || (u.display_name && u.display_name.toLowerCase().includes(q)));
+    }
+    return rowsOf(list.map(u => ({
+      id: u.id,
+      email: u.email,
+      display_name: u.display_name,
+      status: u.status,
+      is_owner: u.is_owner,
+      email_verified_at: u.email_verified_at,
+      created_at: u.created_at || new Date(),
+      last_login_at: u.last_login_at || new Date(),
+      active_devices: db.deviceKeys.filter(k => k.user_id === u.id && !k.revoked_at).length,
+      share_count: db.shares.filter(s => s.owner_id === u.id || s.viewer_id === u.id).length,
+    })));
+  });
+
+  on(/^UPDATE users SET status = 'disabled', disabled_at = now\(\) WHERE id = \$1 AND status = 'active' RETURNING id$/, (db, [id]) => {
+    const u = db.users.find(x => x.id === id && x.status === 'active');
+    if (!u) return rowsOf([]);
+    u.status = 'disabled';
+    u.disabled_at = new Date();
+    return rowsOf([{ id: u.id }]);
+  });
+
+  on(/^UPDATE users SET status = 'active', disabled_at = NULL WHERE id = \$1 AND status = 'disabled' RETURNING id$/, (db, [id]) => {
+    const u = db.users.find(x => x.id === id && x.status === 'disabled');
+    if (!u) return rowsOf([]);
+    u.status = 'active';
+    u.disabled_at = null;
+    return rowsOf([{ id: u.id }]);
+  });
+
+  on(/^DELETE FROM users WHERE id = \$1(?: RETURNING id)?$/, (db, [id]) => {
+    const idx = db.users.findIndex(x => x.id === id);
+    if (idx === -1) return rowsOf([]);
+    const [deleted] = db.users.splice(idx, 1);
+    // Cascade
+    db.deviceKeys = db.deviceKeys.filter(k => k.user_id !== id);
+    db.shares = db.shares.filter(s => s.owner_id !== id && s.viewer_id !== id);
+    db.readings = db.readings.filter(r => r.user_id !== id);
+    db.emailTokens = db.emailTokens.filter(t => t.user_id !== id);
+    return rowsOf([{ id: deleted.id }]);
+  });
+
   on(/^UPDATE users SET password_hash = \$1, token_version = token_version \+ 1 WHERE id = \$2(?: RETURNING .*)?$/, (db, [hash, id]) => {
     const u = db.users.find(x => x.id === id);
     if (u) {
@@ -252,6 +319,42 @@ function buildHandlers() {
     const activeKeys = db.deviceKeys.filter(k => k.user_id === userId && !k.revoked_at);
     activeKeys.forEach(k => { k.revoked_at = new Date(); });
     return rowsOf([]);
+  });
+
+  on(/^SELECT id, label, key_prefix, role, created_at, last_used_at, revoked_at FROM device_keys WHERE user_id = \$1 ORDER BY created_at DESC$/, (db, [userId]) =>
+    rowsOf(db.deviceKeys.filter(k => k.user_id === userId)
+      .sort((a, b) => b.created_at - a.created_at)
+      .map(k => ({
+        id: k.id,
+        label: k.label,
+        key_prefix: k.key_prefix,
+        role: k.role,
+        created_at: k.created_at,
+        last_used_at: k.last_used_at,
+        revoked_at: k.revoked_at,
+      }))));
+
+  on(/^UPDATE device_keys SET revoked_at = now\(\) WHERE id = \$1 AND revoked_at IS NULL RETURNING id, user_id$/, (db, [id]) => {
+    const k = db.deviceKeys.find(x => x.id === id && !x.revoked_at);
+    if (!k) return rowsOf([]);
+    k.revoked_at = new Date();
+    return rowsOf([{ id: k.id, user_id: k.user_id }]);
+  });
+
+  on(/^SELECT s\.id, s\.owner_id, s\.viewer_id, s\.created_at, ou\.email AS owner_email, vu\.email AS viewer_email FROM shares s JOIN users ou ON s\.owner_id = ou\.id JOIN users vu ON s\.viewer_id = vu\.id WHERE s\.owner_id = \$1 OR s\.viewer_id = \$1 ORDER BY s\.created_at DESC$/, (db, [userId]) => {
+    const userShares = db.shares.filter(s => s.owner_id === userId || s.viewer_id === userId);
+    return rowsOf(userShares.map(s => {
+      const owner = db.users.find(u => u.id === s.owner_id);
+      const viewer = db.users.find(u => u.id === s.viewer_id);
+      return {
+        id: s.id,
+        owner_id: s.owner_id,
+        viewer_id: s.viewer_id,
+        created_at: s.created_at,
+        owner_email: owner?.email,
+        viewer_email: viewer?.email,
+      };
+    }));
   });
 
   // ---- upload path (POST /api/check-trend) ----

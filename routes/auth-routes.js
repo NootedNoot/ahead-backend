@@ -242,9 +242,13 @@ router.get('/me', requireUser, asyncHandler(async (req, res) => {
   });
 }));
 
+async function isUserOwner(userId, userEmail) {
+  const { rows } = await db.query('SELECT is_owner FROM users WHERE id = $1', [userId]);
+  return Boolean(rows[0]?.is_owner || (process.env.OWNER_EMAIL && userEmail && userEmail.toLowerCase() === process.env.OWNER_EMAIL.toLowerCase()));
+}
+
 router.get('/system-health', requireUser, asyncHandler(async (req, res) => {
-  const { rows } = await db.query('SELECT is_owner FROM users WHERE id = $1', [req.user.id]);
-  const isOwner = Boolean(rows[0]?.is_owner || (process.env.OWNER_EMAIL && req.user.email.toLowerCase() === process.env.OWNER_EMAIL.toLowerCase()));
+  const isOwner = await isUserOwner(req.user.id, req.user.email);
   if (!isOwner) return res.status(403).json({ error: 'Owner access required' });
 
   const { rows: userCountRows } = await db.query('SELECT COUNT(*)::int AS count FROM users');
@@ -263,6 +267,163 @@ router.get('/system-health', requireUser, asyncHandler(async (req, res) => {
     nodeVersion: process.version,
     memoryUsageMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
   });
+}));
+
+// --- Owner User Management Endpoints ---
+
+router.get('/owner/users', requireUser, asyncHandler(async (req, res) => {
+  const isOwner = await isUserOwner(req.user.id, req.user.email);
+  if (!isOwner) return res.status(403).json({ error: 'Owner access required' });
+
+  const search = (req.query.q || '').trim();
+  const conditions = [];
+  const params = [];
+  if (search) {
+    params.push(`%${search}%`);
+    conditions.push(`(u.email ILIKE $${params.length} OR u.display_name ILIKE $${params.length})`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const { rows } = await db.query(
+    `SELECT u.id, u.email, u.display_name, u.status, u.is_owner, u.email_verified_at, u.created_at, u.last_login_at,
+            (SELECT COUNT(*)::int FROM device_keys dk WHERE dk.user_id = u.id AND dk.revoked_at IS NULL) AS active_devices,
+            (SELECT COUNT(*)::int FROM shares s WHERE s.owner_id = u.id OR s.viewer_id = u.id) AS share_count
+     FROM users u
+     ${where}
+     ORDER BY u.created_at ASC`,
+    params,
+  );
+
+  res.json({
+    users: rows.map(r => ({
+      id: r.id,
+      email: r.email,
+      displayName: r.display_name,
+      status: r.status,
+      isOwner: r.is_owner,
+      emailVerified: r.email_verified_at !== null,
+      createdAt: r.created_at,
+      lastLoginAt: r.last_login_at,
+      activeDevices: r.active_devices || 0,
+      shareCount: r.share_count || 0,
+    })),
+  });
+}));
+
+router.get('/owner/users/:id', requireUser, asyncHandler(async (req, res) => {
+  const isOwner = await isUserOwner(req.user.id, req.user.email);
+  if (!isOwner) return res.status(403).json({ error: 'Owner access required' });
+
+  const { rows: userRows } = await db.query(
+    `SELECT id, email, display_name, status, is_owner, email_verified_at, created_at, last_login_at
+     FROM users WHERE id = $1`,
+    [req.params.id],
+  );
+  if (userRows.length === 0) return res.status(404).json({ error: 'User not found' });
+  const u = userRows[0];
+
+  const { rows: devices } = await db.query(
+    `SELECT id, label, key_prefix, role, created_at, last_used_at, revoked_at
+     FROM device_keys WHERE user_id = $1 ORDER BY created_at DESC`,
+    [req.params.id],
+  );
+
+  const { rows: shares } = await db.query(
+    `SELECT s.id, s.owner_id, s.viewer_id, s.created_at, ou.email AS owner_email, vu.email AS viewer_email
+     FROM shares s
+     JOIN users ou ON s.owner_id = ou.id
+     JOIN users vu ON s.viewer_id = vu.id
+     WHERE s.owner_id = $1 OR s.viewer_id = $1
+     ORDER BY s.created_at DESC`,
+    [req.params.id],
+  );
+
+  res.json({
+    user: {
+      id: u.id,
+      email: u.email,
+      displayName: u.display_name,
+      status: u.status,
+      isOwner: u.is_owner,
+      emailVerified: u.email_verified_at !== null,
+      createdAt: u.created_at,
+      lastLoginAt: u.last_login_at,
+    },
+    devices: devices.map(d => ({
+      id: d.id,
+      label: d.label,
+      keyPrefix: d.key_prefix,
+      role: d.role,
+      createdAt: d.created_at,
+      lastUsedAt: d.last_used_at,
+      revoked: d.revoked_at !== null,
+    })),
+    shares: shares.map(s => ({
+      id: s.id,
+      ownerId: s.owner_id,
+      viewerId: s.viewer_id,
+      ownerEmail: s.owner_email,
+      viewerEmail: s.viewer_email,
+      createdAt: s.created_at,
+    })),
+  });
+}));
+
+router.post('/owner/users/:id/disable', requireUser, asyncHandler(async (req, res) => {
+  const isOwner = await isUserOwner(req.user.id, req.user.email);
+  if (!isOwner) return res.status(403).json({ error: 'Owner access required' });
+  if (req.params.id === req.user.id) {
+    return res.status(400).json({ error: 'Cannot disable your own owner account' });
+  }
+
+  const { rows } = await db.query(
+    `UPDATE users SET status = 'disabled', disabled_at = now() WHERE id = $1 AND status = 'active' RETURNING id`,
+    [req.params.id],
+  );
+  if (rows.length === 0) return res.status(404).json({ error: 'User not found or already disabled' });
+  res.json({ success: true, disabled: true });
+}));
+
+router.post('/owner/users/:id/enable', requireUser, asyncHandler(async (req, res) => {
+  const isOwner = await isUserOwner(req.user.id, req.user.email);
+  if (!isOwner) return res.status(403).json({ error: 'Owner access required' });
+
+  const { rows } = await db.query(
+    `UPDATE users SET status = 'active', disabled_at = NULL WHERE id = $1 AND status = 'disabled' RETURNING id`,
+    [req.params.id],
+  );
+  if (rows.length === 0) return res.status(404).json({ error: 'User not found or already active' });
+  res.json({ success: true, enabled: true });
+}));
+
+router.delete('/owner/users/:id', requireUser, asyncHandler(async (req, res) => {
+  const isOwner = await isUserOwner(req.user.id, req.user.email);
+  if (!isOwner) return res.status(403).json({ error: 'Owner access required' });
+  if (req.params.id === req.user.id) {
+    return res.status(400).json({ error: 'Cannot delete your own owner account' });
+  }
+
+  const { rows: targetRows } = await db.query('SELECT id, email, is_owner FROM users WHERE id = $1', [req.params.id]);
+  if (targetRows.length === 0) return res.status(404).json({ error: 'User not found' });
+  if (targetRows[0].is_owner) {
+    return res.status(403).json({ error: 'Cannot delete an account designated as owner' });
+  }
+
+  // Database foreign keys have ON DELETE CASCADE for related records
+  await db.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+  res.json({ success: true, deleted: true, email: targetRows[0].email });
+}));
+
+router.post('/owner/devices/:id/revoke', requireUser, asyncHandler(async (req, res) => {
+  const isOwner = await isUserOwner(req.user.id, req.user.email);
+  if (!isOwner) return res.status(403).json({ error: 'Owner access required' });
+
+  const { rows } = await db.query(
+    `UPDATE device_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING id, user_id`,
+    [req.params.id],
+  );
+  if (rows.length === 0) return res.status(404).json({ error: 'Device key not found or already revoked' });
+  res.json({ success: true, revoked: true });
 }));
 
 router.post('/change-password', requireUser, asyncHandler(async (req, res) => {
