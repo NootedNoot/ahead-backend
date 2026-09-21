@@ -444,6 +444,35 @@ function buildHandlers() {
     rowsOf(db.readings.filter(r => r.user_id === userId).sort((a, b) => b.reading_time_ms - a.reading_time_ms).slice(0, limit)
       .map(r => ({ sgv: r.sgv, reading_time_ms: String(r.reading_time_ms) }))));
 
+  on(/^SELECT reading_time_ms, sgv, rate, severity, projected, action FROM readings WHERE user_id = \$1 ORDER BY reading_time_ms DESC LIMIT \$2$/, (db, [userId, limit]) =>
+    rowsOf(db.readings.filter(r => r.user_id === userId).sort((a, b) => b.reading_time_ms - a.reading_time_ms).slice(0, limit)
+      .map(r => ({
+        reading_time_ms: String(r.reading_time_ms),
+        sgv: r.sgv,
+        rate: r.rate !== undefined ? r.rate : null,
+        severity: r.severity || null,
+        projected: r.projected !== undefined ? r.projected : null,
+        action: r.action || null,
+      }))));
+
+  on(/^UPDATE readings SET rate = \$1, severity = \$2, projected = \$3 WHERE user_id = \$4 AND reading_time_ms = \$5$/, (db, [rate, severity, projected, userId, time]) => {
+    const row = db.readings.find(r => r.user_id === userId && r.reading_time_ms === Number(time));
+    if (row) {
+      row.rate = rate;
+      row.severity = severity;
+      row.projected = projected;
+    }
+    return { rows: [], rowCount: row ? 1 : 0 };
+  });
+
+  on(/^UPDATE readings SET action = \$1 WHERE user_id = \$2 AND reading_time_ms = \$3$/, (db, [action, userId, time]) => {
+    const row = db.readings.find(r => r.user_id === userId && r.reading_time_ms === Number(time));
+    if (row) {
+      row.action = action;
+    }
+    return { rows: [], rowCount: row ? 1 : 0 };
+  });
+
   on(/^SELECT sgv, reading_time_ms FROM readings WHERE user_id = \$1 AND reading_time_ms >= \$2 ORDER BY reading_time_ms ASC$/, (db, [userId, since]) =>
     rowsOf(db.readings.filter(r => r.user_id === userId && r.reading_time_ms >= since).sort((a, b) => a.reading_time_ms - b.reading_time_ms)
       .map(r => ({ sgv: r.sgv, reading_time_ms: String(r.reading_time_ms) }))));

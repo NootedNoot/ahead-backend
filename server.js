@@ -79,6 +79,7 @@ app.use('/api/devices', devicesRoutes);
 app.use('/api/viewer-keys', viewerKeysRoutes);
 app.use('/api/shares', sharesRoutes);
 app.use('/api/readings', readingsRoutes);
+app.use('/api/alerts', readingsRoutes);
 
 // Stub - no real push provider wired up yet (Android app doesn't register
 // device tokens yet). Swap this out once FCM/APNs/etc. is in place.
@@ -174,6 +175,23 @@ app.post('/api/check-trend', requireDeviceKey, async (req, res) => {
         minutesSinceLastBolus,
       });
       results.push({ date: reading.date, ...result, guesses });
+
+      // Save computed telemetry for owner logging and review
+      try {
+        await db.query(
+          `UPDATE readings SET rate = $1, severity = $2, projected = $3
+           WHERE user_id = $4 AND reading_time_ms = $5`,
+          [
+            typeof result.rate === 'number' && Number.isFinite(result.rate) ? result.rate : null,
+            result.severity || 'none',
+            typeof result.projected === 'number' && Number.isFinite(result.projected) ? result.projected : null,
+            userId,
+            reading.date,
+          ]
+        );
+      } catch (logErr) {
+        console.warn('[TelemetryLog] Failed to update reading telemetry:', logErr.message);
+      }
     }
 
     res.json({ processed: results });

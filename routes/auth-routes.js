@@ -422,6 +422,85 @@ router.get('/system-health', requireUser, asyncHandler(async (req, res) => {
   });
 }));
 
+// GET /api/auth/owner/telemetry-log
+// Real-time telemetry log of glucose, severity (red, yellow, green), and rate of change (+/-).
+// Strictly privileged for owner account.
+router.get('/owner/telemetry-log', requireUser, asyncHandler(async (req, res) => {
+  const isOwner = await isUserOwner(req.user.id, req.user.email);
+  if (!isOwner) return res.status(403).json({ error: 'Owner access required' });
+
+  // Privacy: strictly return the owner's own data stream only
+  const targetUserId = req.user.id;
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
+
+  const { rows } = await db.query(
+    `SELECT reading_time_ms, sgv, rate, severity, projected, action
+     FROM readings
+     WHERE user_id = $1
+     ORDER BY reading_time_ms DESC
+     LIMIT $2`,
+    [targetUserId, limit],
+  );
+
+  const entries = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const nextOlder = i + 1 < rows.length ? rows[i + 1] : null;
+    const timeMs = Number(r.reading_time_ms);
+    let rate = r.rate !== null && r.rate !== undefined ? Number(r.rate) : null;
+    const isBackfilled = r.action === null && r.rate === null;
+
+    if (rate === null && nextOlder) {
+      const dtMin = (timeMs - Number(nextOlder.reading_time_ms)) / 60000;
+      if (dtMin > 0 && dtMin <= 15) {
+        rate = Number(((r.sgv - nextOlder.sgv) / dtMin).toFixed(2));
+      }
+    }
+
+    let severity = r.severity;
+    if (!severity || severity === 'none') {
+      if (r.sgv <= 70 || r.sgv >= 250) severity = 'red';
+      else if (r.sgv <= 80 || r.sgv >= 200) severity = 'yellow';
+      else severity = 'green';
+    } else if (severity === 'none') {
+      severity = 'green';
+    }
+
+    let arrow = '→';
+    if (rate !== null) {
+      if (rate > 3.0) arrow = '⇈';
+      else if (rate > 2.0) arrow = '↑';
+      else if (rate > 1.0) arrow = '↗';
+      else if (rate < -3.0) arrow = '⇊';
+      else if (rate < -2.0) arrow = '↓';
+      else if (rate < -1.0) arrow = '↘';
+    }
+
+    const projected = r.projected !== null && r.projected !== undefined
+      ? Number(r.projected)
+      : (rate !== null ? Math.round(r.sgv + rate * 15) : r.sgv);
+
+    entries.push({
+      timestamp: timeMs,
+      date: new Date(timeMs).toISOString(),
+      sgv: r.sgv,
+      rate: rate !== null ? Number(rate.toFixed(2)) : null,
+      rateFormatted: rate !== null ? `${rate >= 0 ? '+' : ''}${rate.toFixed(2)} mg/dL/min` : '--',
+      severity, // 'red' | 'yellow' | 'green'
+      projected,
+      arrow,
+      action: r.action || (isBackfilled ? 'backfilled' : 'none'),
+      isBackfilled,
+    });
+  }
+
+  res.json({
+    userId: targetUserId,
+    count: entries.length,
+    entries,
+  });
+}));
+
 // --- Owner User Management Endpoints ---
 
 router.get('/owner/users', requireUser, asyncHandler(async (req, res) => {

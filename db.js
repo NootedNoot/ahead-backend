@@ -56,6 +56,10 @@ async function ensureSchema() {
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS target_high INTEGER DEFAULT 180;`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS units TEXT DEFAULT 'mg/dL';`,
     `ALTER TABLE device_keys ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'uploader';`,
+    `ALTER TABLE readings ADD COLUMN IF NOT EXISTS rate DOUBLE PRECISION;`,
+    `ALTER TABLE readings ADD COLUMN IF NOT EXISTS severity TEXT;`,
+    `ALTER TABLE readings ADD COLUMN IF NOT EXISTS projected INTEGER;`,
+    `ALTER TABLE readings ADD COLUMN IF NOT EXISTS action TEXT;`,
   ];
 
   for (const sql of migrations) {

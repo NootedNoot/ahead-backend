@@ -103,3 +103,64 @@ test('Owner Admin: Owner can delete a user, but cannot delete own account or ano
   assert.equal(h.fake.users.find(u => u.id === target.id), undefined);
   assert.equal(h.fake.deviceKeys.filter(k => k.user_id === target.id).length, 0);
 });
+
+test('Owner Telemetry Log: Non-owner gets 403', async () => {
+  const regular = h.fake.addUser({ email: 'regular@aheadt1d.com' });
+  const res = await h.http('GET', '/api/auth/owner/telemetry-log', { headers: h.bearer(regular) });
+  assert.equal(res.status, 403);
+});
+
+test('Owner Telemetry Log: Owner gets 200, strictly returns owner-only readings, marks backfilled rows', async () => {
+  const owner = h.fake.addUser({ email: 'ryan@aheadt1d.com' });
+  owner.is_owner = true;
+
+  const otherUser = h.fake.addUser({ email: 'other@aheadt1d.com' });
+
+  const now = Date.now();
+  // Owner readings
+  h.fake.addReading(owner.id, now - 600000, 235);
+  h.fake.addReading(owner.id, now - 300000, 240);
+  const readingRow = h.fake.readings.find(r => r.user_id === owner.id && r.reading_time_ms === now - 300000);
+  readingRow.rate = 1.0;
+  readingRow.severity = 'red';
+  readingRow.projected = 255;
+  readingRow.action = 'audible_red';
+
+  // Other user reading (should NEVER be returned to owner even if ?userId is passed)
+  h.fake.addReading(otherUser.id, now - 100000, 110);
+
+  // Attempt to pass ?userId=otherUser.id -> Must be ignored and strictly return owner data
+  const res = await h.http('GET', `/api/auth/owner/telemetry-log?userId=${otherUser.id}`, { headers: h.bearer(owner) });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.userId, owner.id);
+  assert.equal(res.json.entries.length, 2);
+
+  // First entry has explicit action
+  const latest = res.json.entries[0];
+  assert.equal(latest.sgv, 240);
+  assert.equal(latest.action, 'audible_red');
+  assert.equal(latest.isBackfilled, false);
+
+  // Second entry has no action or rate recorded, marked backfilled
+  const older = res.json.entries[1];
+  assert.equal(older.sgv, 235);
+  assert.equal(older.isBackfilled, true);
+  assert.equal(older.action, 'backfilled');
+});
+
+test('Alerts Action: Records action for reading', async () => {
+  const user = h.fake.addUser({ email: 'devuser@aheadt1d.com' });
+  const now = Date.now();
+  h.fake.addReading(user.id, now, 235);
+
+  const res = await h.http('POST', '/api/alerts/action', {
+    headers: h.bearer(user),
+    body: { readingTime: now, action: 'silent_yellow_update' },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.success, true);
+  assert.equal(res.json.action, 'silent_yellow_update');
+
+  const row = h.fake.readings.find(r => r.user_id === user.id && r.reading_time_ms === now);
+  assert.equal(row.action, 'silent_yellow_update');
+});

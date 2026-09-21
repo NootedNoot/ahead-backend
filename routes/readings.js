@@ -213,4 +213,24 @@ router.delete('/', requireDeviceOrUser, asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Readings cleared' });
 }));
 
+// POST /api/readings/action
+// Records the phone's decision/action taken for a specific reading (e.g. audible_red, silent_yellow, held_high_red, suppressed_cooldown)
+router.post('/action', requireDeviceOrUser, asyncHandler(async (req, res) => {
+  const userId = req.userId || req.user?.id;
+  if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+  const { readingTime, action } = req.body || {};
+  if (!readingTime || !action || typeof action !== 'string') {
+    return res.status(400).json({ error: 'readingTime and action string required' });
+  }
+
+  await db.query(
+    `UPDATE readings SET action = $1
+     WHERE user_id = $2 AND reading_time_ms = $3`,
+    [action, userId, Number(readingTime)]
+  );
+
+  res.json({ success: true, readingTime, action });
+}));
+
 module.exports = router;
