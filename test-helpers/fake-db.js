@@ -132,12 +132,38 @@ function buildHandlers() {
     return rowsOf([]);
   });
 
-  on(/^UPDATE users SET password_hash = \$1, token_version = token_version \+ 1 WHERE id = \$2(?: RETURNING email)?$/, (db, [hash, id]) => {
+  on(/^SELECT id, email, display_name, email_verified_at, created_at, last_login_at, is_owner FROM users WHERE id = \$1$/, (db, [id]) =>
+    rowsOf(db.users.filter(u => u.id === id).map(u => ({
+      id: u.id,
+      email: u.email,
+      display_name: u.display_name,
+      email_verified_at: u.email_verified_at,
+      created_at: u.created_at || new Date(),
+      last_login_at: u.last_login_at || new Date(),
+      is_owner: u.is_owner,
+    }))));
+
+  on(/^SELECT id, email, password_hash, display_name, is_owner FROM users WHERE id = \$1$/, (db, [id]) =>
+    rowsOf(db.users.filter(u => u.id === id).map(u => ({
+      id: u.id,
+      email: u.email,
+      password_hash: u.password_hash,
+      display_name: u.display_name,
+      is_owner: u.is_owner,
+    }))));
+
+  on(/^UPDATE users SET password_hash = \$1, token_version = token_version \+ 1 WHERE id = \$2(?: RETURNING .*)?$/, (db, [hash, id]) => {
     const u = db.users.find(x => x.id === id);
     if (u) {
       u.password_hash = hash;
       u.token_version = (u.token_version || 0) + 1;
-      return rowsOf([{ email: u.email }]);
+      return rowsOf([{
+        id: u.id,
+        email: u.email,
+        display_name: u.display_name,
+        token_version: u.token_version,
+        is_owner: u.is_owner,
+      }]);
     }
     return rowsOf([]);
   });
@@ -228,6 +254,10 @@ function buildHandlers() {
 
   on(/^SELECT sgv, reading_time_ms FROM readings WHERE user_id = \$1 ORDER BY reading_time_ms DESC LIMIT \$2$/, (db, [userId, limit]) =>
     rowsOf(db.readings.filter(r => r.user_id === userId).sort((a, b) => b.reading_time_ms - a.reading_time_ms).slice(0, limit)
+      .map(r => ({ sgv: r.sgv, reading_time_ms: String(r.reading_time_ms) }))));
+
+  on(/^SELECT sgv, reading_time_ms FROM readings WHERE user_id = \$1 AND reading_time_ms >= \$2 ORDER BY reading_time_ms ASC$/, (db, [userId, since]) =>
+    rowsOf(db.readings.filter(r => r.user_id === userId && r.reading_time_ms >= since).sort((a, b) => a.reading_time_ms - b.reading_time_ms)
       .map(r => ({ sgv: r.sgv, reading_time_ms: String(r.reading_time_ms) }))));
 
   on(/^DELETE FROM readings WHERE user_id = \$1( AND reading_time_ms >= \$2)?$/, (db, [userId, since], sql) => {

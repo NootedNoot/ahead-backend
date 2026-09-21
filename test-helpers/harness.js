@@ -78,7 +78,7 @@ async function http(method, path, { headers = {}, body } = {}) {
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* non-JSON body */ }
-  return { status: res.status, json, text };
+  return { status: res.status, headers: res.headers, json, text };
 }
 
 function bearer(user) {

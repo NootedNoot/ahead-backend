@@ -210,4 +210,71 @@ router.post('/verify-email/confirm', asyncHandler(async (req, res) => {
   res.json({ verified: true });
 }));
 
+router.get('/me', requireUser, asyncHandler(async (req, res) => {
+  const { rows } = await db.query(
+    'SELECT id, email, display_name, email_verified_at, created_at, last_login_at, is_owner FROM users WHERE id = $1',
+    [req.user.id],
+  );
+  const user = rows[0];
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      displayName: user.display_name,
+      emailVerified: !!user.email_verified_at,
+      createdAt: user.created_at,
+      lastLoginAt: user.last_login_at,
+      isOwner: user.is_owner,
+    },
+  });
+}));
+
+router.post('/change-password', requireUser, asyncHandler(async (req, res) => {
+  const { oldPassword, newPassword } = req.body || {};
+  if (typeof newPassword !== 'string' || newPassword.length < 10) {
+    return res.status(400).json({ error: 'New password of at least 10 characters is required' });
+  }
+
+  const { rows: userRows } = await db.query(
+    'SELECT id, email, password_hash, display_name, is_owner FROM users WHERE id = $1',
+    [req.user.id],
+  );
+  const user = userRows[0];
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const ok = await verifyPassword(oldPassword, user.password_hash);
+  if (!ok) return res.status(401).json({ error: 'Incorrect current password' });
+
+  const passwordHash = await hashPassword(newPassword);
+  const updatedUser = await db.transaction(async (tx) => {
+    const { rows } = await tx(
+      `UPDATE users SET password_hash = $1, token_version = token_version + 1 WHERE id = $2
+       RETURNING id, email, display_name, token_version, is_owner`,
+      [passwordHash, user.id],
+    );
+    await tx(
+      `UPDATE device_keys SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`,
+      [user.id],
+    );
+    return rows[0];
+  });
+
+  if (updatedUser?.email) {
+    sendPasswordChangedEmail(updatedUser.email)
+      .catch(err => console.error('Failed to send password-changed email:', err));
+  }
+
+  res.json({
+    success: true,
+    token: signUserToken(updatedUser),
+    user: {
+      id: updatedUser.id,
+      email: updatedUser.email,
+      displayName: updatedUser.display_name,
+      isOwner: updatedUser.is_owner,
+    },
+  });
+}));
+
 module.exports = router;
