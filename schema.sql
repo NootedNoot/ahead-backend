@@ -78,6 +78,18 @@ CREATE TABLE IF NOT EXISTS device_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_device_keys_user_id ON device_keys(user_id);
 
+-- 2026-09-20 (viewer keys): the same table also holds long-lived READ-ONLY
+-- "viewer" keys for the caregiver app (Ahead Lite), so its background reads
+-- don't die with its 30-day login token. role separates the two: 'uploader'
+-- is the original device key (POST /api/check-trend etc, X-Ahead-Api-Key),
+-- 'viewer' may only call GET /api/readings and GET /api/shares/accessible
+-- (X-Ahead-Viewer-Key). Every existing row becomes 'uploader' via the
+-- default, so nothing that works today changes. requireDeviceKey (auth.js)
+-- accepts ONLY role='uploader', so a viewer key's hash can never
+-- authenticate as an uploader. Also in migrations/2026-09-20_viewer_keys.sql
+-- (same statement) for databases that already exist.
+ALTER TABLE device_keys ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'uploader' CHECK (role IN ('uploader', 'viewer'));
+
 -- One table for both password-reset and email-verify tokens - same
 -- lifecycle either way (generate, email, single-use, expire), no reason to
 -- duplicate it into two tables. Same hashed-at-rest pattern as
