@@ -196,6 +196,13 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Ahead backend listening on port ${PORT}`);
-});
+// Only bind a port when run directly (`node server.js` / `npm start`, which is
+// what Railway does). When the tests require() this file they get the bare
+// Express app back and start it on an ephemeral port themselves.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Ahead backend listening on port ${PORT}`);
+  });
+}
+
+module.exports = app;
