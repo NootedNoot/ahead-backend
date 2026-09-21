@@ -130,8 +130,16 @@ router.post('/login', asyncHandler(async (req, res) => {
 
 router.delete('/account', requireUser, asyncHandler(async (req, res) => {
   const { password } = req.body || {};
-  const { rows } = await db.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
-  const ok = rows[0] && typeof password === 'string' && await verifyPassword(password, rows[0].password_hash);
+  const { rows } = await db.query('SELECT email, password_hash, is_owner FROM users WHERE id = $1', [req.user.id]);
+  const user = rows[0];
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const isOwner = Boolean(user.is_owner || (process.env.OWNER_EMAIL && user.email.toLowerCase() === process.env.OWNER_EMAIL.toLowerCase()));
+  if (isOwner) {
+    return res.status(403).json({ error: 'Owner account cannot be deleted via self-service' });
+  }
+
+  const ok = typeof password === 'string' && await verifyPassword(password, user.password_hash);
   if (!ok) return res.status(403).json({ error: 'Incorrect password' });
 
   // ON DELETE CASCADE on every table that references users.id (device_keys,
@@ -218,7 +226,7 @@ router.post('/verify-email/confirm', asyncHandler(async (req, res) => {
 
 router.get('/me', requireUser, asyncHandler(async (req, res) => {
   const { rows } = await db.query(
-    'SELECT id, email, display_name, email_verified_at, created_at, last_login_at, is_owner FROM users WHERE id = $1',
+    'SELECT id, email, display_name, email_verified_at, created_at, last_login_at, is_owner, dob, diagnosis_date, target_low, target_high, units FROM users WHERE id = $1',
     [req.user.id],
   );
   const user = rows[0];
@@ -238,6 +246,151 @@ router.get('/me', requireUser, asyncHandler(async (req, res) => {
       createdAt: user.created_at,
       lastLoginAt: user.last_login_at,
       isOwner: isOwner,
+      dob: user.dob || null,
+      diagnosisDate: user.diagnosis_date || null,
+      targetLow: user.target_low != null ? Number(user.target_low) : 70,
+      targetHigh: user.target_high != null ? Number(user.target_high) : 180,
+      units: user.units || 'mg/dL',
+    },
+  });
+}));
+
+router.patch('/profile', requireUser, asyncHandler(async (req, res) => {
+  const { displayName, dob, diagnosisDate, targetLow, targetHigh, units } = req.body || {};
+
+  const updates = [];
+  const params = [req.user.id];
+
+  if (displayName !== undefined) {
+    const val = typeof displayName === 'string' ? displayName.trim() : null;
+    params.push(val);
+    updates.push(`display_name = $${params.length}`);
+  }
+
+  if (dob !== undefined) {
+    const val = typeof dob === 'string' && dob.trim() ? dob.trim() : null;
+    params.push(val);
+    updates.push(`dob = $${params.length}`);
+  }
+
+  if (diagnosisDate !== undefined) {
+    const val = typeof diagnosisDate === 'string' && diagnosisDate.trim() ? diagnosisDate.trim() : null;
+    params.push(val);
+    updates.push(`diagnosis_date = $${params.length}`);
+  }
+
+  if (targetLow !== undefined) {
+    const num = parseInt(targetLow, 10);
+    if (isNaN(num) || num < 40 || num > 150) {
+      return res.status(400).json({ error: 'Target low must be between 40 and 150 mg/dL' });
+    }
+    params.push(num);
+    updates.push(`target_low = $${params.length}`);
+  }
+
+  if (targetHigh !== undefined) {
+    const num = parseInt(targetHigh, 10);
+    if (isNaN(num) || num < 120 || num > 350) {
+      return res.status(400).json({ error: 'Target high must be between 120 and 350 mg/dL' });
+    }
+    params.push(num);
+    updates.push(`target_high = $${params.length}`);
+  }
+
+  if (units !== undefined) {
+    if (units !== 'mg/dL' && units !== 'mmol/L') {
+      return res.status(400).json({ error: "Units must be either 'mg/dL' or 'mmol/L'" });
+    }
+    params.push(units);
+    updates.push(`units = $${params.length}`);
+  }
+
+  if (updates.length === 0) {
+    return res.status(400).json({ error: 'No valid profile fields provided for update' });
+  }
+
+  const { rows } = await db.query(
+    `UPDATE users SET ${updates.join(', ')} WHERE id = $1 RETURNING id, email, display_name, email_verified_at, created_at, last_login_at, is_owner, dob, diagnosis_date, target_low, target_high, units`,
+    params,
+  );
+  const updated = rows[0];
+  if (!updated) return res.status(404).json({ error: 'User not found' });
+
+  res.json({
+    success: true,
+    user: {
+      id: updated.id,
+      email: updated.email,
+      displayName: updated.display_name,
+      emailVerified: !!updated.email_verified_at,
+      createdAt: updated.created_at,
+      lastLoginAt: updated.last_login_at,
+      isOwner: Boolean(updated.is_owner || (process.env.OWNER_EMAIL && updated.email.toLowerCase() === process.env.OWNER_EMAIL.toLowerCase())),
+      dob: updated.dob || null,
+      diagnosisDate: updated.diagnosis_date || null,
+      targetLow: updated.target_low != null ? Number(updated.target_low) : 70,
+      targetHigh: updated.target_high != null ? Number(updated.target_high) : 180,
+      units: updated.units || 'mg/dL',
+    },
+  });
+}));
+
+router.post('/change-email', requireUser, asyncHandler(async (req, res) => {
+  const { newEmail, currentPassword } = req.body || {};
+  if (!isValidEmail(newEmail)) {
+    return res.status(400).json({ error: 'A valid new email address is required' });
+  }
+  if (typeof currentPassword !== 'string' || !currentPassword) {
+    return res.status(400).json({ error: 'Current password is required to change your email' });
+  }
+
+  const { rows: userRows } = await db.query(
+    'SELECT id, email, password_hash, display_name, is_owner, dob, diagnosis_date, target_low, target_high, units FROM users WHERE id = $1',
+    [req.user.id],
+  );
+  const user = userRows[0];
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const ok = await verifyPassword(currentPassword, user.password_hash);
+  if (!ok) return res.status(401).json({ error: 'Incorrect password' });
+
+  if (newEmail.trim().toLowerCase() === user.email.toLowerCase()) {
+    return res.status(400).json({ error: 'New email is identical to current email' });
+  }
+
+  const { rows: existingRows } = await db.query(
+    'SELECT id FROM users WHERE email = $1',
+    [newEmail.trim()],
+  );
+  if (existingRows.length > 0) {
+    return res.status(409).json({ error: 'An account with that email address already exists' });
+  }
+
+  const { rows: updatedRows } = await db.query(
+    `UPDATE users SET email = $1, email_verified_at = NULL WHERE id = $2
+     RETURNING id, email, display_name, token_version, is_owner, dob, diagnosis_date, target_low, target_high, units`,
+    [newEmail.trim(), user.id],
+  );
+  const updatedUser = updatedRows[0];
+
+  issueEmailToken(updatedUser.id, 'email_verify')
+    .then(rawToken => sendVerificationEmail(updatedUser.email, verifyEmailLink(rawToken)))
+    .catch(err => console.error('Failed to send email verification after email change:', err));
+
+  res.json({
+    success: true,
+    token: signUserToken(updatedUser),
+    user: {
+      id: updatedUser.id,
+      email: updatedUser.email,
+      displayName: updatedUser.display_name,
+      emailVerified: false,
+      isOwner: updatedUser.is_owner,
+      dob: updatedUser.dob || null,
+      diagnosisDate: updatedUser.diagnosis_date || null,
+      targetLow: updatedUser.target_low != null ? Number(updatedUser.target_low) : 70,
+      targetHigh: updatedUser.target_high != null ? Number(updatedUser.target_high) : 180,
+      units: updatedUser.units || 'mg/dL',
     },
   });
 }));

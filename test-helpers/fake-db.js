@@ -150,7 +150,7 @@ function buildHandlers() {
   on(/^SELECT COUNT\(\*\)::int AS count FROM device_keys WHERE revoked_at IS NULL$/, (db) =>
     rowsOf([{ count: db.deviceKeys.filter(k => !k.revoked_at).length }]));
 
-  on(/^SELECT id, email, display_name, email_verified_at, created_at, last_login_at, is_owner FROM users WHERE id = \$1$/, (db, [id]) =>
+  on(/^SELECT id, email, display_name, email_verified_at, created_at, last_login_at, is_owner(?:, dob, diagnosis_date, target_low, target_high, units)? FROM users WHERE id = \$1$/, (db, [id]) =>
     rowsOf(db.users.filter(u => u.id === id).map(u => ({
       id: u.id,
       email: u.email,
@@ -159,14 +159,31 @@ function buildHandlers() {
       created_at: u.created_at || new Date(),
       last_login_at: u.last_login_at || new Date(),
       is_owner: u.is_owner,
+      dob: u.dob || null,
+      diagnosis_date: u.diagnosis_date || null,
+      target_low: u.target_low != null ? u.target_low : 70,
+      target_high: u.target_high != null ? u.target_high : 180,
+      units: u.units || 'mg/dL',
     }))));
 
-  on(/^SELECT id, email, password_hash, display_name, is_owner FROM users WHERE id = \$1$/, (db, [id]) =>
+  on(/^SELECT id, email, password_hash, display_name, is_owner(?:, dob, diagnosis_date, target_low, target_high, units)? FROM users WHERE id = \$1$/, (db, [id]) =>
     rowsOf(db.users.filter(u => u.id === id).map(u => ({
       id: u.id,
       email: u.email,
       password_hash: u.password_hash,
       display_name: u.display_name,
+      is_owner: u.is_owner,
+      dob: u.dob || null,
+      diagnosis_date: u.diagnosis_date || null,
+      target_low: u.target_low != null ? u.target_low : 70,
+      target_high: u.target_high != null ? u.target_high : 180,
+      units: u.units || 'mg/dL',
+    }))));
+
+  on(/^SELECT email, password_hash, is_owner FROM users WHERE id = \$1$/, (db, [id]) =>
+    rowsOf(db.users.filter(u => u.id === id).map(u => ({
+      email: u.email,
+      password_hash: u.password_hash,
       is_owner: u.is_owner,
     }))));
 
@@ -251,6 +268,56 @@ function buildHandlers() {
       }]);
     }
     return rowsOf([]);
+  });
+
+  on(/^UPDATE users SET email = \$1, email_verified_at = NULL WHERE id = \$2 RETURNING .*$/, (db, [email, id]) => {
+    const u = db.users.find(x => x.id === id);
+    if (u) {
+      u.email = email;
+      u.email_verified_at = null;
+      return rowsOf([{
+        id: u.id,
+        email: u.email,
+        display_name: u.display_name,
+        token_version: u.token_version || 0,
+        is_owner: u.is_owner,
+        dob: u.dob || null,
+        diagnosis_date: u.diagnosis_date || null,
+        target_low: u.target_low != null ? u.target_low : 70,
+        target_high: u.target_high != null ? u.target_high : 180,
+        units: u.units || 'mg/dL',
+      }]);
+    }
+    return rowsOf([]);
+  });
+
+  on(/^UPDATE users SET (?:[a-z_]+ = \$\d+(?:, )?)+ WHERE id = \$1 RETURNING .*$/, (db, params, sql) => {
+    const id = params[0];
+    const u = db.users.find(x => x.id === id);
+    if (!u) return rowsOf([]);
+
+    // Parse out which column corresponds to which parameter index
+    const assignments = sql.match(/SET (.+?) WHERE/)[1].split(', ');
+    assignments.forEach(assign => {
+      const [col, paramPlaceholder] = assign.split(' = ');
+      const pIdx = parseInt(paramPlaceholder.replace('$', ''), 10) - 1;
+      u[col] = params[pIdx];
+    });
+
+    return rowsOf([{
+      id: u.id,
+      email: u.email,
+      display_name: u.display_name,
+      email_verified_at: u.email_verified_at,
+      created_at: u.created_at || new Date(),
+      last_login_at: u.last_login_at || new Date(),
+      is_owner: u.is_owner,
+      dob: u.dob || null,
+      diagnosis_date: u.diagnosis_date || null,
+      target_low: u.target_low != null ? u.target_low : 70,
+      target_high: u.target_high != null ? u.target_high : 180,
+      units: u.units || 'mg/dL',
+    }]);
   });
 
   // ---- email_tokens ----

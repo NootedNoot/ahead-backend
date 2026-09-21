@@ -53,6 +53,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAUL
 -- POST /users/:id/set-owner), same "no admin action without an audit
 -- trail" discipline every other privilege change in this schema follows.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS dob DATE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS diagnosis_date DATE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS target_low INTEGER DEFAULT 70;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS target_high INTEGER DEFAULT 180;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS units TEXT DEFAULT 'mg/dL';
 
 -- Separate from `users` entirely - admins are not self-serve, sign a
 -- DIFFERENT JWT with a DIFFERENT secret (ADMIN_JWT_SECRET) so a regular
