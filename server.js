@@ -202,8 +202,10 @@ app.use((err, req, res, next) => {
 // what Railway does). When the tests require() this file they get the bare
 // Express app back and start it on an ephemeral port themselves.
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`Ahead backend listening on port ${PORT}`);
+  db.ensureSchema().finally(() => {
+    app.listen(PORT, () => {
+      console.log(`Ahead backend listening on port ${PORT}`);
+    });
   });
 }
 

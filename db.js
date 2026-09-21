@@ -42,4 +42,30 @@ async function transaction(fn) {
   }
 }
 
-module.exports = { pool, query, transaction };
+async function ensureSchema() {
+  if (!process.env.DATABASE_URL) {
+    return;
+  }
+  const migrations = [
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT false;`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS dob DATE;`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS diagnosis_date DATE;`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS target_low INTEGER DEFAULT 70;`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS target_high INTEGER DEFAULT 180;`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS units TEXT DEFAULT 'mg/dL';`,
+    `ALTER TABLE device_keys ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'uploader';`,
+  ];
+
+  for (const sql of migrations) {
+    try {
+      await pool.query(sql);
+    } catch (err) {
+      console.warn('[DB] ensureSchema notice:', sql.trim(), err.message);
+    }
+  }
+  console.log('[DB] Database schema migration check complete.');
+}
+
+module.exports = { pool, query, transaction, ensureSchema };
