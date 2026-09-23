@@ -488,7 +488,10 @@ function classifySeverity({ currentValue, rate, projected, projectedExtended, re
     redProj <= params.redProjectedLow || (currentValue <= params.redProjectedLow && rate < 0);
   const highSideRed =
     redProj >= params.redProjectedHigh || (currentValue >= params.redProjectedHigh && rate > 0);
-  if (allowRed && (lowSideRed || highSideRed)) return 'red';
+  // 2026-09-23: [allowRed] (the noisy-trajectory veto) no longer applies to the LOW side - mirrors
+  // SeverityEngine.kt. A real second low (87 -> 89 -> 83 -> 74, projected 47) was classified noisy
+  // at its turn and scored yellow. A spurious low alarm costs a finger-stick; a missed one doesn't.
+  if (lowSideRed || (allowRed && highSideRed)) return 'red';
 
   // YELLOW: a sufficiently fast rate escalates when in a vulnerable range or heading toward danger.
   // Gated so a fast fall from a high (e.g. 180 -> 120) doesn't fire a false alarm when the 15m projection is safe.
