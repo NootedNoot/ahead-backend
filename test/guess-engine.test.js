@@ -9,7 +9,7 @@ const readings = (sgvs) => sgvs.map((sgv, i) => ({ sgv, date: at((sgvs.length - 
 
 const ctx = (over) => ({
   currentValue: 200, rate: 0, severity: 'yellow',
-  readings: readings([200, 200]), timeOfDayHour: 14, minutesSinceLastBolus: null, ...over,
+  readings: readings([200, 200]), timeOfDayHour: 14, minutesSinceLastBolus: null, minutesSinceExercise: null, ...over,
 });
 
 test('non-event returns no guesses', () => {
@@ -41,6 +41,34 @@ test('rebounding from a treated low (46 -> 69 rising) is recognized, not "no cle
 test('dropping low suggests exercise', () => {
   const g = generateGuesses(ctx({ currentValue: 68, rate: -1.5, severity: 'red', readings: readings([90, 68]) }));
   assert.ok(g.some(x => x.label === 'Recent exercise pulling you down?'));
+});
+
+test('exercise-dependent guesses (2026-09-23): a low with a logged exercise event 30 min ago gets a high-confidence exercise guess, even with a flat/positive rate', () => {
+  const g = generateGuesses(ctx({
+    currentValue: 68, rate: 0.2, severity: 'red', minutesSinceExercise: 30,
+    readings: readings([70, 68]),
+  }));
+  const exercise = g.find(x => x.label === 'Recent exercise pulling you down?');
+  assert.ok(exercise, 'exercise guess present from a real logged event');
+  assert.equal(exercise.confidence, 'high', 'a confirmed recent exercise log is a strong signal');
+});
+
+test('exercise-dependent guesses: a low with no logged exercise event still falls back to the rate-shape guess (unchanged prior behavior)', () => {
+  const g = generateGuesses(ctx({
+    currentValue: 68, rate: -1.5, severity: 'red', minutesSinceExercise: null,
+    readings: readings([90, 68]),
+  }));
+  const exercise = g.find(x => x.label === 'Recent exercise pulling you down?');
+  assert.ok(exercise, 'exercise guess present from rate shape alone');
+  assert.equal(exercise.confidence, 'low', 'no logged event is a weaker signal than a confirmed one');
+});
+
+test('exercise-dependent guesses: a low with an exercise event logged 5h ago (past the 240min cutoff) and a rate that is not fast gets neither exercise guess', () => {
+  const g = generateGuesses(ctx({
+    currentValue: 68, rate: -0.3, severity: 'red', minutesSinceExercise: 300,
+    readings: readings([72, 68]),
+  }));
+  assert.ok(!g.some(x => x.label === 'Recent exercise pulling you down?'), 'stale exercise log and a slow rate suggest neither');
 });
 
 test('bolus-dependent guesses (2026-08-25): a stubborn high with no logged bolus gets a low-confidence missed-bolus prompt', () => {

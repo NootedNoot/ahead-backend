@@ -25,6 +25,7 @@ const CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
  *   readings: [{ sgv, date }],          // recent, oldest -> newest
  *   timeOfDayHour: number,              // 0-23 local
  *   minutesSinceLastBolus: number|null, // null if no INSULIN event has ever been logged, or if the logged one is somehow after this reading
+ *   minutesSinceExercise: number|null,  // null if no EXERCISE event has ever been logged, or if the logged one is somehow after this reading
  * }
  */
 function generateGuesses(context) {
@@ -63,8 +64,16 @@ function generateGuesses(context) {
 
   // ---------- LOW-side event ----------
   if (currentValue < 80) {
-    if (rate < -1.0) {
-      guesses.push({ label: 'Recent exercise pulling you down?', confidence: 'medium' });
+    // Prefer a REAL logged exercise event over inferring purely from rate shape (2026-09-23 - the rate-only
+    // version fired the same guess whether or not exercise was ever logged, unlike the bolus-aware guesses
+    // right above which correctly gate on a real timestamp).
+    if (context.minutesSinceExercise != null && context.minutesSinceExercise < 240) {
+      // Within the ~4h window the owner described as "actively moving plus a while after" - see the
+      // Android-side TreatmentEffectWindow.EXERCISE_ACTIVE/RISK windows this mirrors in spirit (not
+      // ported 1:1 here - this file only produces UI hypotheses, never an alert decision).
+      guesses.push({ label: 'Recent exercise pulling you down?', confidence: 'high' });
+    } else if (rate < -1.0) {
+      guesses.push({ label: 'Recent exercise pulling you down?', confidence: 'low' });
     }
     if (Math.abs(rate) < 0.5) {
       guesses.push({ label: 'Slow drift low - a snack worth considering?', confidence: 'low' });

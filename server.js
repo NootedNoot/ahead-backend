@@ -110,7 +110,7 @@ app.post('/analyze', requireDeviceKey, (req, res) => {
 // that readings are now actually persisted, per user, are new.
 app.post('/api/check-trend', requireDeviceKey, async (req, res) => {
   try {
-    const { readings, tuning, lastBolusTimestamp } = req.body;
+    const { readings, tuning, lastBolusTimestamp, lastExerciseTimestamp } = req.body;
 
     if (!Array.isArray(readings) || readings.length < 2) {
       return res.status(400).json({ error: 'Missing or insufficient glucose readings (need at least 2)' });
@@ -166,6 +166,9 @@ app.post('/api/check-trend', requireDeviceKey, async (req, res) => {
       const minutesSinceLastBolus = typeof lastBolusTimestamp === 'number' && lastBolusTimestamp <= reading.date
         ? Math.round((reading.date - lastBolusTimestamp) / 60000)
         : null;
+      const minutesSinceExercise = typeof lastExerciseTimestamp === 'number' && lastExerciseTimestamp <= reading.date
+        ? Math.round((reading.date - lastExerciseTimestamp) / 60000)
+        : null;
       const guesses = generateGuesses({
         currentValue: result.currentValue,
         rate: result.rate,
@@ -173,6 +176,7 @@ app.post('/api/check-trend', requireDeviceKey, async (req, res) => {
         readings: historyUpToHere,
         timeOfDayHour: new Date(reading.date).getHours(),
         minutesSinceLastBolus,
+        minutesSinceExercise,
       });
       results.push({ date: reading.date, ...result, guesses });
 
