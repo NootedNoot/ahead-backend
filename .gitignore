@@ -1,3 +1,7 @@
 node_modules/
 .idea/
 scripts/create-companion.js
+.env
+bin/cloudflared.exe
+cloudflared.log
+active-tunnel-url.txt

@@ -15,12 +15,31 @@ const { Pool } = require('pg');
 // committed here as supabase-ca.crt - it's a public certificate, not a
 // secret, safe to have in the repo) so the connection now does real
 // verify-full-style validation instead of trust-on-connect.
+try {
+  require('dotenv').config();
+} catch (_) {}
+
+const dbUrl = process.env.DATABASE_URL || '';
+const isLocal = !dbUrl ||
+  dbUrl.includes('localhost') ||
+  dbUrl.includes('127.0.0.1') ||
+  process.env.DATABASE_SSL === 'false';
+
+let sslConfig = false;
+if (!isLocal) {
+  const caPath = path.join(__dirname, 'supabase-ca.crt');
+  const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath, 'utf8') : undefined;
+  if (ca) {
+    sslConfig = {
+      rejectUnauthorized: true,
+      ca,
+    };
+  }
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: true,
-    ca: fs.readFileSync(path.join(__dirname, 'supabase-ca.crt'), 'utf8'),
-  },
+  ssl: sslConfig,
 });
 
 function query(text, params) {
