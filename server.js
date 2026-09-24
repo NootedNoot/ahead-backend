@@ -92,6 +92,16 @@ async function sendPushNotification(message) {
   return { stub: true, message };
 }
 
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'ahead-backend',
+    time: new Date().toISOString(),
+    uptime_seconds: Math.round(process.uptime()),
+    database: db.pool ? 'connected' : 'unconfigured',
+  });
+});
+
 app.get('/', (req, res) => {
   res.send('Ahead backend is running.');
 });
