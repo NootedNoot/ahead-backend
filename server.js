@@ -239,7 +239,7 @@ app.use((err, req, res, next) => {
 // Express app back and start it on an ephemeral port themselves.
 if (require.main === module) {
   db.ensureSchema().finally(() => {
-    app.listen(PORT, () => {
+    app.listen(PORT, '0.0.0.0', () => {
       console.log(`Ahead backend listening on port ${PORT}`);
     });
   });

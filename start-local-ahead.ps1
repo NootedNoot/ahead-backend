@@ -50,27 +50,37 @@ foreach ($ip in $LocalIPs) {
 }
 
 # 5. Start Cloudflare Tunnel
-Write-Host "`n[*] Starting Cloudflare Tunnel..." -ForegroundColor White
-$TunnelLog = Join-Path $ScriptDir "cloudflared.log"
-if (Test-Path $TunnelLog) { Remove-Item $TunnelLog -Force }
+$ExistingTunnel = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+$TunnelUrlFile = Join-Path $ScriptDir "active-tunnel-url.txt"
 
-$TunnelProc = Start-Process -FilePath $Cloudflared `
-    -ArgumentList "tunnel --url http://localhost:3000" `
-    -WorkingDirectory $ScriptDir `
-    -RedirectStandardError $TunnelLog `
-    -PassThru -WindowStyle Hidden
-
-Write-Host "[*] Waiting for Cloudflare Tunnel URL..." -ForegroundColor Gray
-
-$TunnelUrl = $null
-$Timeout = 30
-for ($i = 0; $i -lt $Timeout; $i++) {
-    Start-Sleep -Seconds 1
+if ($ExistingTunnel -and (Test-Path $TunnelUrlFile)) {
+    $TunnelUrl = (Get-Content $TunnelUrlFile -Raw -ErrorAction SilentlyContinue).Trim()
+    Write-Host "[+] Cloudflare Tunnel already running (PID: $($ExistingTunnel[0].Id))" -ForegroundColor Green
+} else {
+    Write-Host "`n[*] Starting Cloudflare Tunnel..." -ForegroundColor White
+    $TunnelLog = Join-Path $ScriptDir "cloudflared.log"
     if (Test-Path $TunnelLog) {
-        $content = Get-Content $TunnelLog -Raw -ErrorAction SilentlyContinue
-        if ($content -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
-            $TunnelUrl = $matches[0]
-            break
+        try { Remove-Item $TunnelLog -Force -ErrorAction SilentlyContinue } catch {}
+    }
+
+    $TunnelProc = Start-Process -FilePath $Cloudflared `
+        -ArgumentList "tunnel --url http://127.0.0.1:3000" `
+        -WorkingDirectory $ScriptDir `
+        -RedirectStandardError $TunnelLog `
+        -PassThru -WindowStyle Hidden
+
+    Write-Host "[*] Waiting for Cloudflare Tunnel URL..." -ForegroundColor Gray
+
+    $TunnelUrl = $null
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Seconds 1
+        if (Test-Path $TunnelLog) {
+            $logContent = Get-Content $TunnelLog -Raw -ErrorAction SilentlyContinue
+            if ($logContent -match "(https://[a-zA-Z0-9-]+\.trycloudflare\.com)") {
+                $TunnelUrl = $Matches[1]
+                $TunnelUrl | Out-File -FilePath $TunnelUrlFile -Encoding utf8 -Force
+                break
+            }
         }
     }
 }
@@ -80,16 +90,17 @@ if ($TunnelUrl) {
     Write-Host " TUNNEL ACTIVE! Use this URL in Ahead / Ahead Lite:" -ForegroundColor Yellow
     Write-Host " $TunnelUrl" -ForegroundColor Cyan
     Write-Host "==================================================" -ForegroundColor Green
-    $TunnelUrl | Out-File -FilePath (Join-Path $ScriptDir "active-tunnel-url.txt") -Encoding utf8
 } else {
     Write-Host "[!] Tunnel started, but URL could not be auto-parsed. Check cloudflared.log" -ForegroundColor Yellow
 }
 
-Write-Host "`nPress Ctrl+C to stop the Cloudflare Tunnel." -ForegroundColor Gray
-try {
-    Wait-Process -Id $TunnelProc.Id
-} finally {
-    if (-not $TunnelProc.HasExited) {
-        Stop-Process -Id $TunnelProc.Id -Force -ErrorAction SilentlyContinue
+if ($TunnelProc) {
+    Write-Host "`nPress Ctrl+C to stop the Cloudflare Tunnel." -ForegroundColor Gray
+    try {
+        Wait-Process -Id $TunnelProc.Id
+    } finally {
+        if (-not $TunnelProc.HasExited) {
+            Stop-Process -Id $TunnelProc.Id -Force -ErrorAction SilentlyContinue
+        }
     }
 }

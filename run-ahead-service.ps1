@@ -147,8 +147,8 @@ function Start-CloudflareTunnel {
         Write-ServiceLog "Starting named Cloudflare Tunnel with permanent token..." "INFO"
         $arguments = "tunnel run --token $token"
     } else {
-        Write-ServiceLog "Starting Cloudflare Quick Tunnel (--url http://localhost:3000)..." "INFO"
-        $arguments = "tunnel --url http://localhost:3000"
+        Write-ServiceLog "Starting Cloudflare Quick Tunnel (--url http://127.0.0.1:3000)..." "INFO"
+        $arguments = "tunnel --url http://127.0.0.1:3000"
     }
 
     $cfOutLog = Join-Path $ScriptDir "cloudflared-out.log"

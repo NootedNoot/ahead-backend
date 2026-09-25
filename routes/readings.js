@@ -1,4 +1,6 @@
 const express = require('express');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const db = require('../db');
 const { requireUser, requireDeviceKey, requireUserOrViewerKey } = require('../auth');
 const asyncHandler = require('../lib/asyncHandler');
@@ -35,6 +37,111 @@ async function resolveOwner(req, res) {
   }
   return ownerId;
 }
+
+// GET /api/readings/live
+// Fast snapshot endpoint for Ahead PC Windows desktop client
+router.get('/live', asyncHandler(async (req, res) => {
+  let userId = null;
+  let userEmail = null;
+  let userDisplayName = null;
+
+  // 1. Check Bearer token in Authorization header or query param
+  const authHeader = req.get('Authorization');
+  let token = null;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice(7).trim();
+  } else if (req.query.token) {
+    token = String(req.query.token).trim();
+  }
+
+  if (token) {
+    try {
+      const payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      const { rows } = await db.query('SELECT id, email, display_name, status, token_version FROM users WHERE id = $1', [payload.sub]);
+      const u = rows[0];
+      if (u && u.status === 'active' && (payload.tokenVersion ?? 0) === u.token_version) {
+        userId = u.id;
+        userEmail = u.email;
+        userDisplayName = u.display_name;
+      }
+    } catch (e) {
+      // Invalid/expired token
+    }
+  }
+
+  // 2. Check X-Ahead-Api-Key device key
+  if (!userId && req.get('X-Ahead-Api-Key')) {
+    const rawKey = req.get('X-Ahead-Api-Key').trim();
+    const keyHash = crypto.createHmac('sha256', process.env.DEVICE_KEY_PEPPER).update(rawKey).digest('hex');
+    const { rows: devRows } = await db.query(
+      `SELECT dk.user_id, u.email, u.display_name FROM device_keys dk
+       JOIN users u ON dk.user_id = u.id
+       WHERE dk.key_hash = $1 AND dk.revoked_at IS NULL AND u.status = 'active'`,
+      [keyHash]
+    );
+    if (devRows.length > 0) {
+      userId = devRows[0].user_id;
+      userEmail = devRows[0].email;
+      userDisplayName = devRows[0].display_name;
+    }
+  }
+
+  // 3. Fallback for unauthenticated local development / single-user loopback
+  if (!userId) {
+    const isLoopback = req.ip === '127.0.0.1' || req.ip === '::1' || req.ip === '::ffff:127.0.0.1' || req.hostname === 'localhost';
+    if (isLoopback) {
+      const { rows: ownerRows } = await db.query('SELECT id, email, display_name FROM users WHERE is_owner = true LIMIT 1');
+      if (ownerRows.length > 0) {
+        userId = ownerRows[0].id;
+        userEmail = ownerRows[0].email;
+        userDisplayName = ownerRows[0].display_name;
+      }
+    }
+    if (!userId) {
+      const { rows: anyUser } = await db.query('SELECT id, email, display_name FROM users ORDER BY created_at ASC LIMIT 1');
+      if (anyUser.length > 0) {
+        userId = anyUser[0].id;
+        userEmail = anyUser[0].email;
+        userDisplayName = anyUser[0].display_name;
+      }
+    }
+  }
+
+  if (!userId) {
+    return res.status(404).json({ error: 'No user configured' });
+  }
+
+  const { rows } = await db.query(
+    `SELECT sgv, reading_time_ms, rate, severity, projected FROM readings
+     WHERE user_id = $1 ORDER BY reading_time_ms DESC LIMIT 48`,
+    [userId]
+  );
+  if (rows.length === 0) return res.json({ latest: null, history: [], user: { id: userId, email: userEmail, displayName: userDisplayName } });
+
+  const latest = rows[0];
+  const history = [...rows].reverse().map(r => ({
+    sgv: r.sgv,
+    timestamp: Number(r.reading_time_ms),
+    rate: r.rate !== null ? Number(r.rate) : 0.0,
+    severity: r.severity || 'none'
+  }));
+
+  res.json({
+    latest: {
+      sgv: latest.sgv,
+      timestamp: Number(latest.reading_time_ms),
+      rate: latest.rate !== null ? Number(latest.rate) : 0.0,
+      severity: latest.severity || 'none',
+      projected: latest.projected !== null ? Number(latest.projected) : null,
+    },
+    history,
+    user: {
+      id: userId,
+      email: userEmail,
+      displayName: userDisplayName
+    }
+  });
+}));
 
 // The companion-app read path. ownerId defaults to the caller's own id;
 // reading anyone else's requires an active `shares` row granting it - the
