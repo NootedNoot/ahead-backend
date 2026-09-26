@@ -1,5 +1,5 @@
 # Ahead Local Self-Hosted Backend Launcher
-# Runs ahead-backend on port 3000 and exposes it via Cloudflare Tunnel for $0/month.
+# 100% Self-Hosted on Local PC: Local Node.js + Local PostgreSQL 18 + Tunnel for Grandma ($0/mo)
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $ScriptDir
@@ -7,7 +7,7 @@ Set-Location $ScriptDir
 function Show-Header {
     Clear-Host
     Write-Host "==========================================================" -ForegroundColor Cyan
-    Write-Host "       AHEAD BACKEND SERVER CONTROL PANEL ($0/mo)        " -ForegroundColor Yellow
+    Write-Host "   AHEAD LOCAL SERVER CONTROL PANEL (100% SELF-HOSTED)    " -ForegroundColor Yellow
     Write-Host "==========================================================" -ForegroundColor Cyan
 }
 
@@ -33,11 +33,24 @@ function Start-Services {
         return
     }
 
-    # 2. Check cloudflared binary
-    $Cloudflared = Join-Path $ScriptDir "bin\cloudflared.exe"
-    if (-not (Test-Path $Cloudflared)) {
-        Write-Host "[ERROR] cloudflared.exe not found at $Cloudflared" -ForegroundColor Red
-        return
+    # 2. Check / Start Local PostgreSQL Server
+    $PgBin = Join-Path $ScriptDir "bin\postgres\bin"
+    $PgData = Join-Path $ScriptDir "data\db"
+    $PgCtl = Join-Path $PgBin "pg_ctl.exe"
+    
+    if (Test-Path $PgCtl) {
+        $pgStatus = & $PgCtl -D $PgData status 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[✔] Local PostgreSQL 18 database is RUNNING on port 5432" -ForegroundColor Green
+        } else {
+            Write-Host "[*] Starting local PostgreSQL database on port 5432..." -ForegroundColor White
+            $logFile = Join-Path $ScriptDir "data\postgres.log"
+            & $PgCtl -D $PgData -l $logFile -o "-p 5432" start
+            Start-Sleep -Seconds 2
+            Write-Host "[✔] Local PostgreSQL database started!" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "[!] Warning: Local PostgreSQL binary not found at $PgCtl" -ForegroundColor Yellow
     }
 
     # 3. Check / Start Node server
@@ -73,7 +86,8 @@ function Start-Services {
         $_.InterfaceAlias -notlike "*Loopback*" -and $_.IPAddress -notlike "169.254*" 
     }).IPAddress
 
-    # 5. Check / Start Cloudflare Tunnel
+    # 5. Check cloudflared binary & Start Tunnel
+    $Cloudflared = Join-Path $ScriptDir "bin\cloudflared.exe"
     $ExistingTunnel = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
     $TunnelUrlFile = Join-Path $ScriptDir "active-tunnel-url.txt"
     $TunnelUrl = if (Test-Path $TunnelUrlFile) { (Get-Content $TunnelUrlFile -Raw -ErrorAction SilentlyContinue).Trim() } else { $null }
@@ -88,51 +102,45 @@ function Start-Services {
             $ExistingTunnel | Stop-Process -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 1
         }
-        Write-Host "[*] Starting fresh Cloudflare Tunnel..." -ForegroundColor White
-        $TunnelLog = Join-Path $ScriptDir "cloudflared.log"
-        if (Test-Path $TunnelLog) {
-            try { Remove-Item $TunnelLog -Force -ErrorAction SilentlyContinue } catch {}
-        }
-
-        Start-Process -FilePath $Cloudflared `
-            -ArgumentList "tunnel --url http://127.0.0.1:3000" `
-            -WorkingDirectory $ScriptDir `
-            -RedirectStandardError $TunnelLog `
-            -WindowStyle Hidden
-
-        Write-Host "[*] Waiting for Cloudflare Tunnel URL..." -ForegroundColor Gray
-        $TunnelUrl = $null
-        for ($i = 0; $i -lt 30; $i++) {
-            Start-Sleep -Seconds 1
+        if (Test-Path $Cloudflared) {
+            Write-Host "[*] Starting fresh Cloudflare Tunnel for Grandma / Remote access..." -ForegroundColor White
+            $TunnelLog = Join-Path $ScriptDir "cloudflared.log"
             if (Test-Path $TunnelLog) {
-                $logContent = Get-Content $TunnelLog -Raw -ErrorAction SilentlyContinue
-                if ($logContent -match "(https://[a-zA-Z0-9-]+\.trycloudflare\.com)") {
-                    $TunnelUrl = $Matches[1]
-                    $TunnelUrl | Out-File -FilePath $TunnelUrlFile -Encoding utf8 -Force
-                    break
+                try { Remove-Item $TunnelLog -Force -ErrorAction SilentlyContinue } catch {}
+            }
+
+            Start-Process -FilePath $Cloudflared `
+                -ArgumentList "tunnel --url http://127.0.0.1:3000" `
+                -WorkingDirectory $ScriptDir `
+                -RedirectStandardError $TunnelLog `
+                -WindowStyle Hidden
+
+            Write-Host "[*] Waiting for Cloudflare Tunnel URL..." -ForegroundColor Gray
+            $TunnelUrl = $null
+            for ($i = 0; $i -lt 30; $i++) {
+                Start-Sleep -Seconds 1
+                if (Test-Path $TunnelLog) {
+                    $logContent = Get-Content $TunnelLog -Raw -ErrorAction SilentlyContinue
+                    if ($logContent -match "(https://[a-zA-Z0-9-]+\.trycloudflare\.com)") {
+                        $TunnelUrl = $Matches[1]
+                        $TunnelUrl | Out-File -FilePath $TunnelUrlFile -Encoding utf8 -Force
+                        break
+                    }
                 }
             }
-        }
-        if ($TunnelUrl) {
-            Write-Host "[✔] New Tunnel URL obtained: $TunnelUrl" -ForegroundColor Green
-        } else {
-            Write-Host "[!] Tunnel started, but URL could not be parsed. Check cloudflared.log" -ForegroundColor Yellow
+            if ($TunnelUrl) {
+                Write-Host "[✔] New Tunnel URL obtained: $TunnelUrl" -ForegroundColor Green
+            } else {
+                Write-Host "[!] Tunnel started, but URL could not be parsed. Check cloudflared.log" -ForegroundColor Yellow
+            }
         }
     }
 
-    # 6. Check 24/7 Railway Production Cloud
-    Write-Host "`n[*] Checking 24/7 Railway Production Cloud..." -ForegroundColor Gray
-    $railwayHealth = Test-Endpoint -Url "https://ahead-backend-production-ee80.up.railway.app/health"
-    if ($railwayHealth.Ok) {
-        Write-Host "[✔] 24/7 Railway Production Cloud is ONLINE (DB: $($railwayHealth.Database))" -ForegroundColor Green
-    } else {
-        Write-Host "[!] Railway Production Cloud check warning: $($railwayHealth.Error)" -ForegroundColor Yellow
-    }
-
-    # 7. Print System Status Box
+    # 6. Print System Status Box (100% Self-Hosted & Local)
     Write-Host "`n==========================================================" -ForegroundColor Green
-    Write-Host "                SYSTEM CONNECTION SUMMARY                 " -ForegroundColor Yellow
+    Write-Host "       SYSTEM CONNECTION SUMMARY (100% SELF-HOSTED)       " -ForegroundColor Yellow
     Write-Host "==========================================================" -ForegroundColor Green
+    Write-Host "  Database:          Local PostgreSQL 18 (localhost:5432/ahead)" -ForegroundColor Cyan
     Write-Host "  Local PC URL:      http://localhost:3000" -ForegroundColor Cyan
     foreach ($ip in $LocalIPs) {
         Write-Host "  Local Network IP:  http://$($ip):3000" -ForegroundColor Cyan
@@ -140,10 +148,9 @@ function Start-Services {
     if ($TunnelUrl) {
         Write-Host "  Tunnel URL:        $TunnelUrl" -ForegroundColor Cyan
     }
-    Write-Host "  Railway Cloud:     https://ahead-backend-production-ee80.up.railway.app" -ForegroundColor Cyan
     Write-Host "----------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  Ahead Lite (Grandma's Phone):" -ForegroundColor White
-    Write-Host "    Connected 24/7 to Railway Cloud (works even if PC is off!)" -ForegroundColor Gray
+    Write-Host "  Ahead PC Windows:  Connected locally to http://127.0.0.1:3000" -ForegroundColor Gray
+    Write-Host "  Ahead Lite (Grandma): Connects to self-hosted server above" -ForegroundColor Gray
     Write-Host "==========================================================" -ForegroundColor Green
 }
 
@@ -154,8 +161,13 @@ while ($true) {
     Write-Host "`nControls: [R]estart Services | [T]est Health | [Q]uit" -ForegroundColor White
     $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown").Character
     switch ($key) {
-        'r' {
+        { $_ -in 'r','R' } {
             Write-Host "`nRestarting all backend services..." -ForegroundColor Yellow
+            $PgCtl = Join-Path $ScriptDir "bin\postgres\bin\pg_ctl.exe"
+            $PgData = Join-Path $ScriptDir "data\db"
+            if (Test-Path $PgCtl) {
+                & $PgCtl -D $PgData stop -m fast | Out-Null
+            }
             Get-Process -Name "node" -ErrorAction SilentlyContinue | Where-Object {
                 try {
                     $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
@@ -166,45 +178,16 @@ while ($true) {
             Start-Sleep -Seconds 1
             Start-Services
         }
-        'R' {
-            Write-Host "`nRestarting all backend services..." -ForegroundColor Yellow
-            Get-Process -Name "node" -ErrorAction SilentlyContinue | Where-Object {
-                try {
-                    $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                    $cmd -like "*server.js*"
-                } catch { $false }
-            } | Stop-Process -Force -ErrorAction SilentlyContinue
-            Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 1
-            Start-Services
-        }
-        't' {
+        { $_ -in 't','T' } {
             Write-Host "`nTesting health endpoints..." -ForegroundColor Cyan
             $TunnelUrlFile = Join-Path $ScriptDir "active-tunnel-url.txt"
             $tUrl = if (Test-Path $TunnelUrlFile) { (Get-Content $TunnelUrlFile -Raw).Trim() } else { $null }
             $loc = Test-Endpoint -Url "http://127.0.0.1:3000/health"
             $tun = if ($tUrl) { Test-Endpoint -Url "$tUrl/health" } else { @{ Ok = $false; Error = "No tunnel URL" } }
-            $rwy = Test-Endpoint -Url "https://ahead-backend-production-ee80.up.railway.app/health"
-            Write-Host "  Local:   $(if ($loc.Ok) { '[✔] OK' } else { '[✖] FAIL: ' + $loc.Error })" -ForegroundColor $(if ($loc.Ok) { 'Green' } else { 'Red' })
-            Write-Host "  Tunnel:  $(if ($tun.Ok) { '[✔] OK' } else { '[✖] FAIL: ' + $tun.Error })" -ForegroundColor $(if ($tun.Ok) { 'Green' } else { 'Red' })
-            Write-Host "  Railway: $(if ($rwy.Ok) { '[✔] OK' } else { '[✖] FAIL: ' + $rwy.Error })" -ForegroundColor $(if ($rwy.Ok) { 'Green' } else { 'Red' })
+            Write-Host "  Local Backend:   $(if ($loc.Ok) { '[✔] OK (DB: ' + $loc.Database + ')' } else { '[✖] FAIL: ' + $loc.Error })" -ForegroundColor $(if ($loc.Ok) { 'Green' } else { 'Red' })
+            Write-Host "  Tunnel (Remote): $(if ($tun.Ok) { '[✔] OK' } else { '[✖] FAIL: ' + $tun.Error })" -ForegroundColor $(if ($tun.Ok) { 'Green' } else { 'Red' })
         }
-        'T' {
-            Write-Host "`nTesting health endpoints..." -ForegroundColor Cyan
-            $TunnelUrlFile = Join-Path $ScriptDir "active-tunnel-url.txt"
-            $tUrl = if (Test-Path $TunnelUrlFile) { (Get-Content $TunnelUrlFile -Raw).Trim() } else { $null }
-            $loc = Test-Endpoint -Url "http://127.0.0.1:3000/health"
-            $tun = if ($tUrl) { Test-Endpoint -Url "$tUrl/health" } else { @{ Ok = $false; Error = "No tunnel URL" } }
-            $rwy = Test-Endpoint -Url "https://ahead-backend-production-ee80.up.railway.app/health"
-            Write-Host "  Local:   $(if ($loc.Ok) { '[✔] OK' } else { '[✖] FAIL: ' + $loc.Error })" -ForegroundColor $(if ($loc.Ok) { 'Green' } else { 'Red' })
-            Write-Host "  Tunnel:  $(if ($tun.Ok) { '[✔] OK' } else { '[✖] FAIL: ' + $tun.Error })" -ForegroundColor $(if ($tun.Ok) { 'Green' } else { 'Red' })
-            Write-Host "  Railway: $(if ($rwy.Ok) { '[✔] OK' } else { '[✖] FAIL: ' + $rwy.Error })" -ForegroundColor $(if ($rwy.Ok) { 'Green' } else { 'Red' })
-        }
-        'q' {
-            Write-Host "`nExiting Ahead Backend Control Panel..." -ForegroundColor Gray
-            break
-        }
-        'Q' {
+        { $_ -in 'q','Q' } {
             Write-Host "`nExiting Ahead Backend Control Panel..." -ForegroundColor Gray
             break
         }

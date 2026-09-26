@@ -3,5 +3,10 @@ node_modules/
 scripts/create-companion.js
 .env
 bin/cloudflared.exe
+bin/postgres/
 cloudflared.log
+*.log
 active-tunnel-url.txt
+data/
+backup/
+

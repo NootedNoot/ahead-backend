@@ -68,8 +68,8 @@ router.post('/signup', asyncHandler(async (req, res) => {
 
   const passwordHash = await hashPassword(password);
   const { rows } = await db.query(
-    `INSERT INTO users (email, password_hash, display_name, last_login_at)
-     VALUES ($1, $2, $3, now())
+    `INSERT INTO users (email, password_hash, display_name, last_login_at, email_verified_at)
+     VALUES ($1, $2, $3, now(), now())
      RETURNING id, email, display_name, token_version, is_owner`,
     [email, passwordHash, displayName || null],
   );
