@@ -130,6 +130,18 @@ function Start-Services {
             }
             if ($TunnelUrl) {
                 Write-Host "[✔] New Tunnel URL obtained: $TunnelUrl" -ForegroundColor Green
+                $websiteDir = Join-Path (Split-Path $ScriptDir -Parent) "ahead-website"
+                if (Test-Path $websiteDir) {
+                    Get-ChildItem -Path $websiteDir -Filter "*.html" | ForEach-Object {
+                        $html = Get-Content $_.FullName -Raw -Encoding utf8
+                        if ($html -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                            $updated = $html -replace 'https://[a-zA-Z0-9-]+\.trycloudflare\.com', $TunnelUrl
+                            if ($updated -ne $html) {
+                                [System.IO.File]::WriteAllText($_.FullName, $updated, [System.Text.Encoding]::UTF8)
+                            }
+                        }
+                    }
+                }
             } else {
                 Write-Host "[!] Tunnel started, but URL could not be parsed. Check cloudflared.log" -ForegroundColor Yellow
             }

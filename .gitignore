@@ -9,4 +9,4 @@ cloudflared.log
 active-tunnel-url.txt
 data/
 backup/
-
+ahead-status.json

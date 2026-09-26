@@ -56,6 +56,7 @@ app.use((err, req, res, next) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, '../ahead-website')));
 
 const PORT = process.env.PORT || 3000;
 

@@ -117,8 +117,8 @@ function buildHandlers() {
   on(/^SELECT id FROM users WHERE email = \$1$/, (db, [email]) =>
     rowsOf(db.users.filter(u => u.email.toLowerCase() === String(email).toLowerCase()).map(u => ({ id: u.id }))));
 
-  on(/^INSERT INTO users \(email, password_hash, display_name, last_login_at\)/, (db, [email, hash, displayName]) => {
-    const user = db.addUser({ email, verified: false });
+  on(/^INSERT INTO users \(email, password_hash, display_name, last_login_at(?:, email_verified_at)?\)/, (db, [email, hash, displayName]) => {
+    const user = db.addUser({ email, verified: true });
     user.password_hash = hash;
     user.display_name = displayName;
     return rowsOf([{ id: user.id, email: user.email, display_name: user.display_name, token_version: user.token_version, is_owner: user.is_owner }]);
@@ -440,9 +440,16 @@ function buildHandlers() {
   on(/^SELECT 1 FROM shares WHERE owner_id = \$1 AND viewer_id = \$2$/, (db, [owner, viewer]) =>
     rowsOf(db.shares.filter(s => s.owner_id === owner && s.viewer_id === viewer).map(() => ({ '?column?': 1 }))));
 
-  on(/^SELECT sgv, reading_time_ms FROM readings WHERE user_id = \$1 ORDER BY reading_time_ms DESC LIMIT \$2$/, (db, [userId, limit]) =>
+  on(/^SELECT sgv, reading_time_ms(?:, rate, severity, projected, action)? FROM readings WHERE user_id = \$1 ORDER BY reading_time_ms DESC LIMIT \$2$/, (db, [userId, limit]) =>
     rowsOf(db.readings.filter(r => r.user_id === userId).sort((a, b) => b.reading_time_ms - a.reading_time_ms).slice(0, limit)
-      .map(r => ({ sgv: r.sgv, reading_time_ms: String(r.reading_time_ms) }))));
+      .map(r => ({
+        sgv: r.sgv,
+        reading_time_ms: String(r.reading_time_ms),
+        rate: r.rate !== undefined ? r.rate : null,
+        severity: r.severity || 'none',
+        projected: r.projected !== undefined ? r.projected : null,
+        action: r.action || 'none'
+      }))));
 
   on(/^SELECT reading_time_ms, sgv, rate, severity, projected, action FROM readings WHERE user_id = \$1 ORDER BY reading_time_ms DESC LIMIT \$2$/, (db, [userId, limit]) =>
     rowsOf(db.readings.filter(r => r.user_id === userId).sort((a, b) => b.reading_time_ms - a.reading_time_ms).slice(0, limit)

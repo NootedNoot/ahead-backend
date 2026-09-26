@@ -152,13 +152,20 @@ router.get('/', requireUserOrViewerKey, asyncHandler(async (req, res) => {
   const count = Math.min(parseInt(req.query.count, 10) || 100, 500);
 
   const { rows } = await db.query(
-    `SELECT sgv, reading_time_ms FROM readings
+    `SELECT sgv, reading_time_ms, rate, severity, projected, action FROM readings
      WHERE user_id = $1 ORDER BY reading_time_ms DESC LIMIT $2`,
     [ownerId, count],
   );
   // Ascending, matching the shape ahead-lite-android's old Nightscout
   // client already sorted into - {sgv, date} per entry, oldest first.
-  const entries = rows.reverse().map(r => ({ sgv: r.sgv, date: Number(r.reading_time_ms) }));
+  const entries = rows.reverse().map(r => ({
+    sgv: r.sgv,
+    date: Number(r.reading_time_ms),
+    rate: r.rate !== null && r.rate !== undefined ? Number(Number(r.rate).toFixed(2)) : null,
+    severity: r.severity || 'none',
+    projected: r.projected !== null && r.projected !== undefined ? Number(r.projected) : null,
+    action: r.action || 'none',
+  }));
   res.json({ entries });
 }));
 
