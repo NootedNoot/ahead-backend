@@ -65,6 +65,20 @@ From that point forward, your local PC will ALWAYS be reachable at:
 https://api.aheadt1d.com
 ```
 
+Check it from any browser: `https://api.aheadt1d.com/health` should answer.
+
+### After `api.aheadt1d.com` answers: point everything at it
+
+Until you do this, the apps and site keep using the old `trycloudflare.com` address and break whenever that quick tunnel restarts. Only switch once `/health` works, or everything goes dark at once.
+
+1. **Website:** in `aheadt1d.com/api-config.js`, set `window.AHEAD_API_BASE = "https://api.aheadt1d.com";` and push. That one line covers login, signup, portal, reset-password and verify-email.
+2. **Ahead:** in `ahead-android/app/build.gradle.kts`, set `BACKEND_BASE_URL` to `"https://api.aheadt1d.com"`. Rebuild.
+3. **Ahead Lite:** in `ahead-lite-android/app/src/main/java/com/aheadt1d/lite/AheadBackendClient.kt`, set `PRODUCTION_BASE_URL` to `"https://api.aheadt1d.com"`. Rebuild.
+4. Copy both APKs into `aheadt1d.com/downloads/` and run `node update-hashes.mjs` so the on-page fingerprints match.
+5. Keep the old quick tunnel running for a week or two, so people still on the old APKs keep syncing while they update.
+
+`tunnel-token.txt` is gitignored. Never commit it or paste it anywhere public.
+
 ---
 
 ## 🌐 Website Portal Synchronization

@@ -10,3 +10,6 @@ active-tunnel-url.txt
 data/
 backup/
 ahead-status.json
+
+# Cloudflare named-tunnel token (a secret: anyone with it can run your tunnel)
+tunnel-token.txt
