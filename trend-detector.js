@@ -71,7 +71,7 @@ const VULNERABLE_DROP_CEILING_MGDL = 140;
 const VULNERABLE_RISE_FLOOR_MGDL = 160;
 const RECOVERY_REBOUND_CEILING_MGDL = 240;
 const RECOVERING_FROM_LOW_TRIGGER_MGDL = 80;
-const POST_HYPO_RECOVERY_GRACE_WINDOW_MS = 40 * 60 * 1000;
+const POST_HYPO_RECOVERY_GRACE_WINDOW_MS = 60 * 60 * 1000;
 
 // Default decay for RED's projection on a fast, still-accelerating RISE (not
 // yet confirmed 'decelerating' by assessRateTrajectory). Without this,

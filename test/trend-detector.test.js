@@ -420,7 +420,7 @@ test('reported bug: rose to 227 then dropped to 220 -> projection points DOWN, n
   assert.ok(result.projected < 220, `expected projection below current 220, got ${result.projected}`);
 });
 
-test('post-hypo recovery climb inside 40 minutes stays silent under 240 mg/dL', () => {
+test('post-hypo recovery climb inside 60 minutes stays silent under 240 mg/dL', () => {
   // User was at 75 mg/dL 15m ago, treated with juice, now climbing fast (+3.1 mg/dL/min, currentValue 110, projected 157)
   const severity = classifySeverity({
     currentValue: 110,
