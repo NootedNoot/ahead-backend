@@ -9,9 +9,9 @@ if %errorLevel% neq 0 (
     echo    Requesting Administrator Privileges...
     echo ==========================================================
     echo Windows requires administrator permission to register a
-    echo boot service that runs before user login (NT AUTHORITY\SYSTEM).
+    echo boot service that runs before user login as SYSTEM.
     echo.
-    powershell -NoProfile -Command "Start-Process cmd.exe -ArgumentList '/c `\"`\"%~dp0install-service.bat`\"`\"' -Verb RunAs"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File """"%~dp0register-task.ps1""""' -Verb RunAs"
     exit /b
 )
 
