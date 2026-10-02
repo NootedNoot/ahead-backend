@@ -79,6 +79,10 @@ async function ensureSchema() {
     `ALTER TABLE readings ADD COLUMN IF NOT EXISTS severity TEXT;`,
     `ALTER TABLE readings ADD COLUMN IF NOT EXISTS projected INTEGER;`,
     `ALTER TABLE readings ADD COLUMN IF NOT EXISTS action TEXT;`,
+    `CREATE SEQUENCE IF NOT EXISTS user_events_rev_seq;`,
+    `CREATE TABLE IF NOT EXISTS user_events ( user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, client_id TEXT NOT NULL, event_time_ms BIGINT NOT NULL, tag TEXT NOT NULL, note TEXT, glucose_at_time REAL, client_updated_ms BIGINT NOT NULL, deleted BOOLEAN NOT NULL DEFAULT false, source TEXT NOT NULL DEFAULT 'phone', rev BIGINT NOT NULL DEFAULT nextval('user_events_rev_seq'), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (user_id, client_id) );`,
+    `CREATE INDEX IF NOT EXISTS idx_user_events_rev ON user_events(user_id, rev);`,
+    `CREATE INDEX IF NOT EXISTS idx_user_events_time ON user_events(user_id, event_time_ms);`,
   ];
 
   for (const sql of migrations) {

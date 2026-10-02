@@ -17,6 +17,7 @@ const viewerKeysRoutes = require('./routes/viewer-keys');
 const sharesRoutes = require('./routes/shares');
 const readingsRoutes = require('./routes/readings');
 const adminRoutes = require('./routes/admin');
+const eventsRoutes = require('./routes/events');
 
 const app = express();
 
@@ -84,6 +85,7 @@ app.use('/api/devices', devicesRoutes);
 app.use('/api/viewer-keys', viewerKeysRoutes);
 app.use('/api/shares', sharesRoutes);
 app.use('/api/readings', readingsRoutes);
+app.use('/api/events', eventsRoutes);
 app.use('/api/alerts', readingsRoutes);
 
 // Stub - no real push provider wired up yet (Android app doesn't register

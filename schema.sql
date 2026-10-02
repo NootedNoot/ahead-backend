@@ -180,3 +180,24 @@ CREATE TABLE IF NOT EXISTS shares (
   CHECK (owner_id <> viewer_id)
 );
 CREATE INDEX IF NOT EXISTS idx_shares_viewer_id ON shares(viewer_id);
+
+-- 2026-10-02: user-logged events (notes/tags) synced from the phone app and
+-- the web portal - see routes/events.js for the sync model. Owner-only:
+-- sharing glucose with someone does not share these notes.
+CREATE SEQUENCE IF NOT EXISTS user_events_rev_seq;
+CREATE TABLE IF NOT EXISTS user_events (
+  user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_id         TEXT NOT NULL,
+  event_time_ms     BIGINT NOT NULL,
+  tag               TEXT NOT NULL,
+  note              TEXT,
+  glucose_at_time   REAL,
+  client_updated_ms BIGINT NOT NULL,
+  deleted           BOOLEAN NOT NULL DEFAULT false,
+  source            TEXT NOT NULL DEFAULT 'phone',
+  rev               BIGINT NOT NULL DEFAULT nextval('user_events_rev_seq'),
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_events_rev ON user_events(user_id, rev);
+CREATE INDEX IF NOT EXISTS idx_user_events_time ON user_events(user_id, event_time_ms);

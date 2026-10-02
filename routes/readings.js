@@ -280,6 +280,36 @@ router.get('/stats', requireUserOrViewerKey, asyncHandler(async (req, res) => {
   });
 }));
 
+// GET /api/readings/range?from=<ms>&to=<ms>&ownerId=
+// Every reading in a window (max 90 days), oldest first, as compact
+// parallel arrays - what the doctor report needs (~26k points for 90 days),
+// without paging through the 500-row cap on GET /api/readings.
+router.get('/range', requireUserOrViewerKey, asyncHandler(async (req, res) => {
+  const ownerId = await resolveOwner(req, res);
+  if (!ownerId) return;
+  const num = v => (v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+  const to = num(req.query.to) ?? Date.now();
+  const from = num(req.query.from) ?? to - 14 * 24 * 3600 * 1000;
+  if (to < from || to - from > 90 * 24 * 3600 * 1000 + 3600 * 1000) {
+    return res.status(400).json({ error: 'Range must be between 0 and 90 days' });
+  }
+  const { rows } = await db.query(
+    `SELECT sgv, reading_time_ms FROM readings
+     WHERE user_id = $1 AND reading_time_ms >= $2
+     ORDER BY reading_time_ms ASC`,
+    [ownerId, from],
+  );
+  const t = [];
+  const v = [];
+  for (const r of rows) {
+    const ms = Number(r.reading_time_ms);
+    if (ms > to) break;
+    t.push(ms);
+    v.push(r.sgv);
+  }
+  res.json({ from, to, t, v });
+}));
+
 // GET /api/readings/export
 // Doctor/Endocrinologist CSV download
 router.get('/export', requireUserOrViewerKey, asyncHandler(async (req, res) => {
@@ -299,12 +329,16 @@ router.get('/export', requireUserOrViewerKey, asyncHandler(async (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="ahead-glucose-${days}days.csv"`);
 
+  // tzOffsetMin = the browser's Date.getTimezoneOffset() (minutes BEHIND
+  // UTC, e.g. 360 for MDT). The "Local Time" column used to just be the UTC
+  // time reformatted, so every row was off by the user's UTC offset.
+  const tzOffsetMin = Number.isFinite(Number(req.query.tzOffsetMin)) ? Number(req.query.tzOffsetMin) : 0;
   let csv = 'Timestamp (UTC),Local Time,Glucose (mg/dL)\r\n';
   for (const r of rows) {
     const t = Number(r.reading_time_ms);
     const d = new Date(t);
     const iso = d.toISOString();
-    const local = iso.replace('T', ' ').slice(0, 19);
+    const local = new Date(t - tzOffsetMin * 60000).toISOString().replace('T', ' ').slice(0, 19);
     csv += `"${iso}","${local}",${r.sgv}\r\n`;
   }
   res.send(csv);

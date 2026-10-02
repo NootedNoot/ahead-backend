@@ -22,6 +22,8 @@ class FakeDb {
     this.readings = [];
     this.emailTokens = [];
     this.authEvents = [];
+    this.userEvents = [];
+    this.eventRev = 0;
     this.log = [];              // every normalised SQL string that ran
     this.missingRoleColumn = false;  // simulate "migration not run yet"
     this.failOn = null;         // (sql) => boolean; makes a matching query throw
@@ -60,12 +62,14 @@ class FakeDb {
     return {
       users: copy(this.users), deviceKeys: copy(this.deviceKeys), shares: copy(this.shares),
       readings: copy(this.readings), emailTokens: copy(this.emailTokens),
+      userEvents: copy(this.userEvents), eventRev: this.eventRev,
     };
   }
 
   _restore(s) {
     this.users = s.users; this.deviceKeys = s.deviceKeys; this.shares = s.shares;
     this.readings = s.readings; this.emailTokens = s.emailTokens;
+    this.userEvents = s.userEvents; this.eventRev = s.eventRev;
   }
 
   // ---- seeding helpers ----
@@ -256,6 +260,7 @@ function buildHandlers() {
     db.deviceKeys = db.deviceKeys.filter(k => k.user_id !== id);
     db.shares = db.shares.filter(s => s.owner_id !== id && s.viewer_id !== id);
     db.readings = db.readings.filter(r => r.user_id !== id);
+    db.userEvents = db.userEvents.filter(e => e.user_id !== id);
     db.emailTokens = db.emailTokens.filter(t => t.user_id !== id);
     return rowsOf([{ id: deleted.id }]);
   });
@@ -441,6 +446,48 @@ function buildHandlers() {
     if (existing) existing.sgv = sgv; else db.addReading(userId, time, sgv);
     return rowsOf([]);
   });
+
+
+  // ---- user events (routes/events.js) ----
+  const evCols = e => ({
+    client_id: e.client_id, event_time_ms: String(e.event_time_ms), tag: e.tag, note: e.note,
+    glucose_at_time: e.glucose_at_time, client_updated_ms: String(e.client_updated_ms),
+    deleted: e.deleted, source: e.source, rev: String(e.rev),
+  });
+  const EV_COLS = 'client_id, event_time_ms, tag, note, glucose_at_time, client_updated_ms, deleted, source, rev';
+
+  on(/^INSERT INTO user_events \(user_id, client_id, event_time_ms, tag, note, glucose_at_time, client_updated_ms, deleted, source, rev\) VALUES .* ON CONFLICT \(user_id, client_id\) DO UPDATE SET .* WHERE user_events\.client_updated_ms <= EXCLUDED\.client_updated_ms RETURNING client_id$/,
+    (db, [userId, clientId, time, tag, note, glucose, updated, deleted, source]) => {
+      const existing = db.userEvents.find(e => e.user_id === userId && e.client_id === clientId);
+      if (!existing) {
+        db.eventRev += 1;
+        db.userEvents.push({ user_id: userId, client_id: clientId, event_time_ms: time, tag, note, glucose_at_time: glucose,
+          client_updated_ms: updated, deleted, source, rev: db.eventRev });
+        return rowsOf([{ client_id: clientId }]);
+      }
+      if (existing.client_updated_ms > updated) return rowsOf([]);
+      db.eventRev += 1;
+      Object.assign(existing, { event_time_ms: time, tag, note, glucose_at_time: glucose, client_updated_ms: updated, deleted, rev: db.eventRev });
+      return rowsOf([{ client_id: clientId }]);
+    });
+
+  on(new RegExp('^SELECT ' + EV_COLS + ' FROM user_events WHERE user_id = \\$1 AND rev > \\$2 ORDER BY rev ASC LIMIT \\$3$'), (db, [userId, since, limit]) =>
+    rowsOf(db.userEvents.filter(e => e.user_id === userId && e.rev > since).sort((a, b) => a.rev - b.rev).slice(0, limit).map(evCols)));
+
+  on(new RegExp('^SELECT ' + EV_COLS + ' FROM user_events WHERE user_id = \\$1 AND deleted = false AND event_time_ms BETWEEN \\$2 AND \\$3 ORDER BY event_time_ms ASC LIMIT 5000$'), (db, [userId, from, to]) =>
+    rowsOf(db.userEvents.filter(e => e.user_id === userId && !e.deleted && e.event_time_ms >= from && e.event_time_ms <= to)
+      .sort((a, b) => a.event_time_ms - b.event_time_ms).map(evCols)));
+
+  on(new RegExp('^SELECT ' + EV_COLS + ' FROM user_events WHERE user_id = \\$1 AND client_id = \\$2$'), (db, [userId, clientId]) =>
+    rowsOf(db.userEvents.filter(e => e.user_id === userId && e.client_id === clientId).map(evCols)));
+
+  on(/^SELECT sgv FROM readings WHERE user_id = \$1 AND reading_time_ms BETWEEN \$2 AND \$3 ORDER BY ABS\(reading_time_ms - \$4\) ASC LIMIT 1$/, (db, [userId, lo, hi, at]) =>
+    rowsOf(db.readings.filter(r => r.user_id === userId && r.reading_time_ms >= lo && r.reading_time_ms <= hi)
+      .sort((a, b) => Math.abs(a.reading_time_ms - at) - Math.abs(b.reading_time_ms - at)).slice(0, 1).map(r => ({ sgv: r.sgv }))));
+
+  on(/^SELECT sgv, reading_time_ms FROM readings WHERE user_id = \$1 AND reading_time_ms >= \$2 ORDER BY reading_time_ms ASC$/, (db, [userId, since]) =>
+    rowsOf(db.readings.filter(r => r.user_id === userId && r.reading_time_ms >= since).sort((a, b) => a.reading_time_ms - b.reading_time_ms)
+      .map(r => ({ sgv: r.sgv, reading_time_ms: String(r.reading_time_ms) }))));
 
   // ---- shares / readings ----
   on(/^SELECT 1 FROM shares WHERE owner_id = \$1 AND viewer_id = \$2$/, (db, [owner, viewer]) =>

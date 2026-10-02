@@ -108,6 +108,7 @@ function addKey(user, { role = 'uploader', revoked = false, generator } = {}) {
 function resetState() {
   fake.users = []; fake.deviceKeys = []; fake.shares = []; fake.readings = [];
   fake.emailTokens = []; fake.authEvents = []; fake.log = [];
+  fake.userEvents = []; fake.eventRev = 0;
   fake.missingRoleColumn = false; fake.failOn = null;
   mailer.reset();
 }
