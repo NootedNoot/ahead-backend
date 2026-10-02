@@ -86,24 +86,26 @@ router.get('/live', asyncHandler(async (req, res) => {
     }
   }
 
-  // 3. Fallback for unauthenticated local development / single-user loopback
+  // 3. No credentials: only a request that genuinely came from this machine
+  // (the Windows desktop client) may read the owner's stream. 2026-10-02:
+  // this used to fall back to the owner - and then to "the first user ever
+  // created" - for ANY unauthenticated caller, so anyone on the internet
+  // could read live glucose + email through the public tunnel. Loopback is
+  // judged on the raw socket address (req.ip honors X-Forwarded-For via
+  // `trust proxy`), and anything carrying proxy/tunnel headers is treated as
+  // remote, since cloudflared itself connects from localhost.
   if (!userId) {
-    const isLoopback = req.ip === '127.0.0.1' || req.ip === '::1' || req.ip === '::ffff:127.0.0.1' || req.hostname === 'localhost';
-    if (isLoopback) {
-      const { rows: ownerRows } = await db.query('SELECT id, email, display_name FROM users WHERE is_owner = true LIMIT 1');
-      if (ownerRows.length > 0) {
-        userId = ownerRows[0].id;
-        userEmail = ownerRows[0].email;
-        userDisplayName = ownerRows[0].display_name;
-      }
+    const remote = req.socket && req.socket.remoteAddress;
+    const fromLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+    const proxied = !!(req.get('Cf-Connecting-Ip') || req.get('X-Forwarded-For') || req.get('Cf-Ray'));
+    if (!fromLoopback || proxied) {
+      return res.status(401).json({ error: 'Sign in required' });
     }
-    if (!userId) {
-      const { rows: anyUser } = await db.query('SELECT id, email, display_name FROM users ORDER BY created_at ASC LIMIT 1');
-      if (anyUser.length > 0) {
-        userId = anyUser[0].id;
-        userEmail = anyUser[0].email;
-        userDisplayName = anyUser[0].display_name;
-      }
+    const { rows: ownerRows } = await db.query('SELECT id, email, display_name FROM users WHERE is_owner = true LIMIT 1');
+    if (ownerRows.length > 0) {
+      userId = ownerRows[0].id;
+      userEmail = ownerRows[0].email;
+      userDisplayName = ownerRows[0].display_name;
     }
   }
 
@@ -112,9 +114,9 @@ router.get('/live', asyncHandler(async (req, res) => {
   }
 
   const { rows } = await db.query(
-    `SELECT sgv, reading_time_ms, rate, severity, projected FROM readings
-     WHERE user_id = $1 ORDER BY reading_time_ms DESC LIMIT 48`,
-    [userId]
+    `SELECT sgv, reading_time_ms, rate, severity, projected, action FROM readings
+     WHERE user_id = $1 ORDER BY reading_time_ms DESC LIMIT $2`,
+    [userId, 48]
   );
   if (rows.length === 0) return res.json({ latest: null, history: [], user: { id: userId, email: userEmail, displayName: userDisplayName } });
 

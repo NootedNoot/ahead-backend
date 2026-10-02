@@ -81,6 +81,16 @@ async function http(method, path, { headers = {}, body } = {}) {
   return { status: res.status, headers: res.headers, json, text };
 }
 
+// A request with NO proxy headers at all - what a client on this same
+// machine sends (h.http always adds X-Forwarded-For).
+async function rawGet(path) {
+  const res = await fetch(baseUrl + path);
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* non-JSON body */ }
+  return { status: res.status, json, text };
+}
+
 function bearer(user) {
   return { Authorization: `Bearer ${auth.signUserToken(user)}` };
 }
@@ -102,4 +112,4 @@ function resetState() {
   mailer.reset();
 }
 
-module.exports = { fake, mailer, auth, start, stop, http, bearer, addKey, resetState, crypto };
+module.exports = { fake, mailer, auth, start, stop, http, rawGet, bearer, addKey, resetState, crypto };

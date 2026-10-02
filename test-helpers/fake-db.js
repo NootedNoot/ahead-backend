@@ -132,6 +132,12 @@ function buildHandlers() {
     return rowsOf([]);
   });
 
+  on(/^SELECT id, email, display_name, status, token_version FROM users WHERE id = \$1$/, (db, [id]) => ({
+    rows: db.users.filter(u => u.id === id).map(u => ({ id: u.id, email: u.email, display_name: u.display_name, status: u.status, token_version: u.token_version })),
+  }));
+  on(/^SELECT id, email, display_name FROM users WHERE is_owner = true LIMIT 1$/, db => ({
+    rows: db.users.filter(u => u.is_owner).slice(0, 1).map(u => ({ id: u.id, email: u.email, display_name: u.display_name })),
+  }));
   on(/^UPDATE users SET is_owner = true WHERE id = \$1$/, (db, [id]) => {
     const u = db.users.find(x => x.id === id);
     if (u) u.is_owner = true;
